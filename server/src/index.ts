@@ -102,6 +102,14 @@ async function main() {
             required: ['call_id', 'message'],
           },
         },
+        {
+          name: 'list_active_calls',
+          description: 'List all active phone calls (both outbound and incoming). Use this to discover incoming calls from users.',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+          },
+        },
       ],
     };
   });
@@ -145,6 +153,17 @@ async function main() {
 
         return {
           content: [{ type: 'text', text: `Call ended. Duration: ${durationSeconds}s` }],
+        };
+      }
+
+      if (request.params.name === 'list_active_calls') {
+        const calls = callManager.getActiveCallsInfo();
+
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({ activeCalls: calls }, null, 2),
+          }],
         };
       }
 

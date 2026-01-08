@@ -140,6 +140,51 @@ The MCP server runs locally and automatically creates an ngrok tunnel for phone 
 
 ---
 
+## Incoming Call Support
+
+CallMe can also receive incoming calls! When you call the configured phone number:
+- The call is automatically answered
+- Claude immediately starts listening (no greeting message)
+- Use `list_active_calls` to discover the incoming call
+- Use `continue_call` to respond to the user
+- Use `end_call` to hang up
+
+### Configuration
+
+Incoming calls are enabled by default. To disable:
+
+```bash
+CALLME_ENABLE_INCOMING_CALLS=false
+```
+
+To restrict incoming calls to specific numbers:
+
+```bash
+CALLME_ALLOWED_CALLERS=+15559876543,+15551112222
+```
+
+By default, only the number in `CALLME_USER_PHONE_NUMBER` can call.
+
+### Provider Setup
+
+**Telnyx:**
+- Ensure your Telnyx phone number is configured to receive incoming calls
+- The webhook URL must be set in your Telnyx Voice Application settings
+
+**Twilio:**
+- Configure your Twilio phone number's voice URL to your ngrok webhook
+- Ensure the webhook is set to handle incoming voice calls
+
+### Usage Example
+
+1. Call your configured phone number from your verified number
+2. The call is automatically answered
+3. Speak your instruction to Claude
+4. Use the `list_active_calls` tool in Claude Code to see the incoming call
+5. Use `continue_call` with the call ID to respond
+
+---
+
 ## Tools
 
 ### `initiate_call`
@@ -186,6 +231,32 @@ await end_call({
   call_id: callId,
   message: "Perfect, I'll get started. Talk soon!"
 });
+```
+
+### `list_active_calls`
+List all active phone calls (both outbound and incoming). Use this to discover incoming calls from users.
+
+```typescript
+const { activeCalls } = await list_active_calls();
+// Returns:
+// {
+//   activeCalls: [
+//     {
+//       callId: 'call-1-1234567890',
+//       direction: 'outbound',
+//       userPhoneNumber: '+15559876543',
+//       startTime: '2025-01-08T10:30:00Z',
+//       durationSeconds: 45
+//     },
+//     {
+//       callId: 'call-inbound-2-1234567891',
+//       direction: 'inbound',
+//       userPhoneNumber: '+15551112222',
+//       startTime: '2025-01-08T10:31:00Z',
+//       durationSeconds: 30
+//     }
+//   ]
+// }
 ```
 
 ---

@@ -27,6 +27,7 @@ interface CallState {
   startTime: number;
   hungUp: boolean;
   sttSession: RealtimeSTTSession | null;
+  direction: 'inbound' | 'outbound';  // Call direction
 }
 
 export interface ServerConfig {
@@ -288,8 +289,44 @@ export class CallManager {
   private async handleTwilioWebhook(params: URLSearchParams, res: ServerResponse): Promise<void> {
     const callSid = params.get('CallSid');
     const callStatus = params.get('CallStatus');
+    const callDirection = params.get('Direction'); // 'inbound' or 'outbound-dial'
 
-    console.error(`Twilio webhook: CallSid=${callSid}, CallStatus=${callStatus}`);
+    console.error(`Twilio webhook: CallSid=${callSid}, CallStatus=${callStatus}, Direction=${callDirection}`);
+
+    // DETECT INCOMING CALL
+    if (callDirection === 'inbound' && (callStatus === 'ringing' || callStatus === 'in-progress')) {
+      const fromNumber = params.get('From') || '';
+
+      // Check authorization
+      if (!this.isCallerAllowed(fromNumber)) {
+        console.error(`[Security] Rejecting call from unauthorized number: ${fromNumber}`);
+        res.writeHead(200, { 'Content-Type': 'application/xml' });
+        res.end('<?xml version="1.0" encoding="UTF-8"?><Response><Reject/></Response>');
+        return;
+      }
+
+      // Create call state if not yet created
+      let callId = this.callControlIdToCallId.get(callSid!);
+      if (!callId) {
+        callId = await this.handleIncomingCall(callSid!, fromNumber, 'twilio');
+        this.callControlIdToCallId.set(callSid!, callId);
+      }
+
+      // Return TwiML to connect WebSocket stream
+      const state = this.activeCalls.get(callId);
+      if (state) {
+        const streamUrl = `wss://${new URL(this.config.publicUrl).host}/media-stream?token=${encodeURIComponent(state.wsToken)}`;
+        const xml = this.config.providers.phone.getStreamConnectXml(streamUrl);
+        res.writeHead(200, { 'Content-Type': 'application/xml' });
+        res.end(xml);
+
+        // Start conversation in background
+        this.startInboundConversation(callId).catch(error => {
+          console.error(`[${callId}] Error starting conversation:`, error);
+        });
+        return;
+      }
+    }
 
     // Handle call status updates
     if (callStatus === 'completed' || callStatus === 'busy' || callStatus === 'no-answer' || callStatus === 'failed') {
@@ -344,22 +381,46 @@ export class CallManager {
 
     try {
       switch (eventType) {
-        case 'call.initiated':
-          break;
+        case 'call.initiated': {
+          const callDirection = event.data?.payload?.direction;
+          const fromNumber = event.data?.payload?.from?.phone_number || '';
 
-        case 'call.answered':
-          // Include security token in the stream URL
-          let streamUrl = `wss://${new URL(this.config.publicUrl).host}/media-stream`;
-          const callId = this.callControlIdToCallId.get(callControlId);
-          if (callId) {
-            const state = this.activeCalls.get(callId);
-            if (state) {
-              streamUrl += `?token=${encodeURIComponent(state.wsToken)}`;
+          // DETECT INCOMING CALL
+          if (callDirection === 'incoming') {
+            // Check authorization
+            if (!this.isCallerAllowed(fromNumber)) {
+              console.error(`[Security] Rejecting incoming call from: ${fromNumber}`);
+              await this.config.providers.phone.hangup(callControlId);
+              return;
             }
+
+            // Create call state
+            const callId = await this.handleIncomingCall(callControlId, fromNumber, 'telnyx');
+            this.callControlIdToCallId.set(callControlId, callId);
+          }
+          break;
+        }
+
+        case 'call.answered': {
+          const callId = this.callControlIdToCallId.get(callControlId);
+          const state = callId ? this.activeCalls.get(callId) : null;
+
+          // Start streaming
+          let streamUrl = `wss://${new URL(this.config.publicUrl).host}/media-stream`;
+          if (state) {
+            streamUrl += `?token=${encodeURIComponent(state.wsToken)}`;
           }
           await this.config.providers.phone.startStreaming(callControlId, streamUrl);
           console.error(`Started streaming for call ${callControlId}`);
+
+          // If inbound call, start conversation
+          if (state && state.direction === 'inbound') {
+            this.startInboundConversation(callId).catch(error => {
+              console.error(`[${callId}] Error starting conversation:`, error);
+            });
+          }
           break;
+        }
 
         case 'call.hangup':
           const hangupCallId = this.callControlIdToCallId.get(callControlId);
@@ -420,6 +481,7 @@ export class CallManager {
       startTime: Date.now(),
       hungUp: false,
       sttSession,
+      direction: 'outbound',
     };
 
     this.activeCalls.set(callId, state);
@@ -456,6 +518,82 @@ export class CallManager {
       this.activeCalls.delete(callId);
       throw error;
     }
+  }
+
+  /**
+   * Handle an incoming call by creating the call state
+   */
+  private async handleIncomingCall(
+    callControlId: string,
+    fromPhoneNumber: string,
+    provider: 'telnyx' | 'twilio'
+  ): Promise<string> {
+    const callId = `call-inbound-${++this.currentCallId}-${Date.now()}`;
+
+    // Create STT session
+    const sttSession = this.config.providers.stt.createSession();
+    await sttSession.connect();
+
+    // Generate WebSocket security token
+    const wsToken = generateWebSocketToken();
+
+    // Create call state
+    const state: CallState = {
+      callId,
+      callControlId,
+      userPhoneNumber: fromPhoneNumber,
+      ws: null,
+      streamSid: null,
+      streamingReady: false,
+      wsToken,
+      conversationHistory: [],
+      startTime: Date.now(),
+      hungUp: false,
+      sttSession,
+      direction: 'inbound',
+    };
+
+    this.activeCalls.set(callId, state);
+    this.callControlIdToCallId.set(callControlId, callId);
+    this.wsTokenToCallId.set(wsToken, callId);
+
+    // Auto-answer (Telnyx only, Twilio answers via TwiML)
+    if (provider === 'telnyx') {
+      await this.config.providers.phone.answerCall(callControlId);
+    }
+
+    console.error(`[${callId}] Incoming call from ${fromPhoneNumber}`);
+    return callId;
+  }
+
+  /**
+   * Start conversation for an inbound call (no greeting, immediate listening)
+   */
+  private async startInboundConversation(callId: string): Promise<void> {
+    const state = this.activeCalls.get(callId);
+    if (!state) throw new Error(`Call not found: ${callId}`);
+
+    // Wait for WebSocket and streaming ready
+    await this.waitForConnection(callId, 15000);
+
+    // Start listening immediately (no TTS greeting)
+    console.error(`[${callId}] Starting listening (inbound call)`);
+    const firstTranscript = await this.listen(state);
+    state.conversationHistory.push({ speaker: 'user', message: firstTranscript });
+
+    console.error(`[${callId}] First user message: ${firstTranscript}`);
+  }
+
+  /**
+   * Check if caller is allowed to make incoming calls
+   */
+  private isCallerAllowed(callerNumber: string): boolean {
+    // By default, only the configured user can call
+    const allowedCallers = process.env.CALLME_ALLOWED_CALLERS
+      ? process.env.CALLME_ALLOWED_CALLERS.split(',').map(n => n.trim())
+      : [this.config.userPhoneNumber];
+
+    return allowedCallers.includes(callerNumber);
   }
 
   async continueCall(callId: string, message: string): Promise<string> {
@@ -745,6 +883,37 @@ export class CallManager {
 
   getHttpServer() {
     return this.httpServer;
+  }
+
+  /**
+   * Get information about all active calls
+   */
+  getActiveCallsInfo(): Array<{
+    callId: string;
+    direction: 'inbound' | 'outbound';
+    userPhoneNumber: string;
+    startTime: string;
+    durationSeconds: number;
+  }> {
+    const calls: Array<{
+      callId: string;
+      direction: 'inbound' | 'outbound';
+      userPhoneNumber: string;
+      startTime: string;
+      durationSeconds: number;
+    }> = [];
+
+    for (const [callId, state] of this.activeCalls) {
+      calls.push({
+        callId,
+        direction: state.direction,
+        userPhoneNumber: state.userPhoneNumber,
+        startTime: new Date(state.startTime).toISOString(),
+        durationSeconds: Math.round((Date.now() - state.startTime) / 1000),
+      });
+    }
+
+    return calls;
   }
 
   shutdown(): void {
