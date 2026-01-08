@@ -43,6 +43,8 @@ async function main() {
   const port = await findAvailablePort(basePort);
   if (port !== basePort) {
     console.error(`[callme:${instanceId}] Using port ${port} (base port ${basePort} was in use)`);
+    // Update env var so loadServerConfig() uses the correct port
+    process.env.CALLME_PORT = String(port);
   }
 
   // Start ngrok tunnel to get public URL
