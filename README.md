@@ -103,6 +103,7 @@ Add these to `~/.claude/settings.json` (recommended) or export them in your shel
 | `CALLME_NGROK_DOMAIN` | - | Custom ngrok domain (paid feature) |
 | `CALLME_TRANSCRIPT_TIMEOUT_MS` | `180000` | Timeout for user speech (3 minutes) |
 | `CALLME_STT_SILENCE_DURATION_MS` | `800` | Silence duration to detect end of speech |
+| `CALLME_STT_LANGUAGE` | - | Language code for STT (ISO-639-1: en, fr, es, de, etc.) |
 | `CALLME_TELNYX_PUBLIC_KEY` | - | Telnyx public key for webhook signature verification (recommended) |
 
 ### 4. Install Plugin
@@ -258,6 +259,60 @@ const { activeCalls } = await list_active_calls();
 //   ]
 // }
 ```
+
+---
+
+## Multilingual Support
+
+CallMe supports multiple languages for speech recognition and synthesis.
+
+### Speech-to-Text (STT) Language Configuration
+
+The speech recognition service (OpenAI Realtime API) supports multiple languages. You can specify the language to improve transcription accuracy and reduce latency.
+
+**Environment Variable:**
+```bash
+CALLME_STT_LANGUAGE=fr  # ISO-639-1 language code
+```
+
+**Supported Languages:**
+- `en` - English
+- `fr` - French
+- `es` - Spanish
+- `de` - German
+- `it` - Italian
+- `pt` - Portuguese
+- `zh` - Chinese
+- `ja` - Japanese
+- `ko` - Korean
+- `ru` - Russian
+- And more...
+
+**Behavior:**
+- If not specified, OpenAI will auto-detect the language (slower, less accurate)
+- Specifying a language improves transcription accuracy
+- Reduces latency by skipping language detection step
+
+**Example Configuration (French):**
+```json
+{
+  "env": {
+    "CALLME_OPENAI_API_KEY": "sk-...",
+    "CALLME_STT_LANGUAGE": "fr"
+  }
+}
+```
+
+### Text-to-Speech (TTS) Voices
+
+**Default (OpenAI TTS):**
+- Supports English voices only
+- Available voices: alloy, echo, fable, onyx, nova, shimmer
+- Configured via `CALLME_TTS_VOICE`
+
+**For multilingual TTS support, Amazon Polly is available as an alternative provider.**
+
+See [Amazon Polly TTS Setup](#amazon-polly-tts-setup) below for details on using French or other languages.
 
 ---
 

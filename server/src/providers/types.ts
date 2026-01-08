@@ -109,6 +109,7 @@ export interface STTConfig {
   apiUrl?: string;
   model?: string;
   silenceDurationMs?: number;
+  language?: string;  // ISO-639-1 language code (e.g., 'en', 'fr', 'es')
 }
 
 /**

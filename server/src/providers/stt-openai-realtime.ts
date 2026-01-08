@@ -14,6 +14,7 @@ export class OpenAIRealtimeSTTProvider implements RealtimeSTTProvider {
   readonly name = 'openai-realtime';
   private apiKey: string | null = null;
   private model: string = 'gpt-4o-transcribe';
+  private language?: string;  // Language code for transcription
   private silenceDurationMs: number = 800;
 
   initialize(config: STTConfig): void {
@@ -22,13 +23,14 @@ export class OpenAIRealtimeSTTProvider implements RealtimeSTTProvider {
     }
     this.apiKey = config.apiKey;
     this.model = config.model || 'gpt-4o-transcribe';
+    this.language = config.language;  // Store language config
     this.silenceDurationMs = config.silenceDurationMs || 800;
-    console.error(`STT provider: OpenAI Realtime (${this.model}, silence: ${this.silenceDurationMs}ms)`);
+    console.error(`STT provider: OpenAI Realtime (${this.model}${this.language ? `, language: ${this.language}` : ''}, silence: ${this.silenceDurationMs}ms)`);
   }
 
   createSession(): RealtimeSTTSession {
     if (!this.apiKey) throw new Error('OpenAI Realtime STT not initialized');
-    return new OpenAIRealtimeSTTSession(this.apiKey, this.model, this.silenceDurationMs);
+    return new OpenAIRealtimeSTTSession(this.apiKey, this.model, this.language, this.silenceDurationMs);
   }
 }
 
@@ -36,6 +38,7 @@ class OpenAIRealtimeSTTSession implements RealtimeSTTSession {
   private ws: WebSocket | null = null;
   private apiKey: string;
   private model: string;
+  private language?: string;  // Language for transcription
   private silenceDurationMs: number;
   private connected = false;
   private pendingTranscript = '';
@@ -46,9 +49,10 @@ class OpenAIRealtimeSTTSession implements RealtimeSTTSession {
   private maxReconnectAttempts = 5;
   private reconnectDelayMs = 1000;
 
-  constructor(apiKey: string, model: string, silenceDurationMs: number) {
+  constructor(apiKey: string, model: string, language: string | undefined, silenceDurationMs: number) {
     this.apiKey = apiKey;
     this.model = model;
+    this.language = language;  // Store language
     this.silenceDurationMs = silenceDurationMs;
   }
 
@@ -81,6 +85,7 @@ class OpenAIRealtimeSTTSession implements RealtimeSTTSession {
             input_audio_format: 'g711_ulaw',
             input_audio_transcription: {
               model: this.model,
+              language: this.language,  // Specify language for better accuracy
             },
             turn_detection: {
               type: 'server_vad',

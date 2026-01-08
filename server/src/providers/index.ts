@@ -34,6 +34,7 @@ export interface ProviderConfig {
   openaiApiKey: string;
   ttsVoice?: string;
   sttModel?: string;
+  sttLanguage?: string;  // Language code for STT (ISO-639-1)
   sttSilenceDurationMs?: number;
 }
 
@@ -54,6 +55,7 @@ export function loadProviderConfig(): ProviderConfig {
     openaiApiKey: process.env.CALLME_OPENAI_API_KEY || '',
     ttsVoice: process.env.CALLME_TTS_VOICE || 'onyx',
     sttModel: process.env.CALLME_STT_MODEL || 'gpt-4o-transcribe',
+    sttLanguage: process.env.CALLME_STT_LANGUAGE,  // Load STT language from env
     sttSilenceDurationMs,
   };
 }
@@ -90,6 +92,7 @@ export function createSTTProvider(config: ProviderConfig): RealtimeSTTProvider {
   provider.initialize({
     apiKey: config.openaiApiKey,
     model: config.sttModel,
+    language: config.sttLanguage,  // Pass language to provider
     silenceDurationMs: config.sttSilenceDurationMs,
   });
   return provider;
