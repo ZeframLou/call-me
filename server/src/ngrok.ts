@@ -34,11 +34,18 @@ async function doStartNgrok(port: number): Promise<string> {
     );
   }
 
+  // Enable pooling to allow multiple Claude instances to share the same endpoint
+  // This load-balances requests across instances with the same domain
+  // Can be disabled via CALLME_NGROK_POOLING=false if needed
+  const poolingEnabled = process.env.CALLME_NGROK_POOLING !== 'false';
+
   listener = await ngrok.forward({
     addr: port,
     authtoken,
     // Use custom domain if configured (paid ngrok feature)
     domain: process.env.CALLME_NGROK_DOMAIN || undefined,
+    // Enable pooling for multi-instance support
+    poolingEnabled,
   });
 
   const url = listener.url();

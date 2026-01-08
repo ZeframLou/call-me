@@ -12,19 +12,47 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { CallManager, loadServerConfig } from './phone-call.js';
 import { startNgrok, stopNgrok } from './ngrok.js';
+import { createServer } from 'net';
+
+// Instance ID for logging (helps identify which Claude instance this is)
+const instanceId = process.env.CALLME_INSTANCE_ID || Math.random().toString(36).substring(2, 8);
+
+/**
+ * Find an available port starting from the given port.
+ * Useful when running multiple Claude instances on the same machine.
+ */
+async function findAvailablePort(startPort: number): Promise<number> {
+  return new Promise((resolve) => {
+    const server = createServer();
+    server.listen(startPort, () => {
+      const address = server.address();
+      const port = typeof address === 'object' && address ? address.port : startPort;
+      server.close(() => resolve(port));
+    });
+    server.on('error', () => {
+      // Port in use, try the next one
+      console.error(`[callme:${instanceId}] Port ${startPort} in use, trying ${startPort + 1}...`);
+      findAvailablePort(startPort + 1).then(resolve);
+    });
+  });
+}
 
 async function main() {
-  // Get port for HTTP server
-  const port = parseInt(process.env.CALLME_PORT || '3333', 10);
+  // Find an available port for HTTP server (supports multiple instances)
+  const basePort = parseInt(process.env.CALLME_PORT || '3333', 10);
+  const port = await findAvailablePort(basePort);
+  if (port !== basePort) {
+    console.error(`[callme:${instanceId}] Using port ${port} (base port ${basePort} was in use)`);
+  }
 
   // Start ngrok tunnel to get public URL
-  console.error('Starting ngrok tunnel...');
+  console.error(`[callme:${instanceId}] Starting ngrok tunnel...`);
   let publicUrl: string;
   try {
     publicUrl = await startNgrok(port);
-    console.error(`ngrok tunnel: ${publicUrl}`);
+    console.error(`[callme:${instanceId}] ngrok tunnel: ${publicUrl}`);
   } catch (error) {
-    console.error('Failed to start ngrok:', error instanceof Error ? error.message : error);
+    console.error(`[callme:${instanceId}] Failed to start ngrok:`, error instanceof Error ? error.message : error);
     process.exit(1);
   }
 
@@ -33,7 +61,7 @@ async function main() {
   try {
     serverConfig = loadServerConfig(publicUrl);
   } catch (error) {
-    console.error('Configuration error:', error instanceof Error ? error.message : error);
+    console.error(`[callme:${instanceId}] Configuration error:`, error instanceof Error ? error.message : error);
     await stopNgrok();
     process.exit(1);
   }
@@ -163,14 +191,14 @@ async function main() {
   await mcpServer.connect(transport);
 
   console.error('');
-  console.error('CallMe MCP server ready');
-  console.error(`Phone: ${serverConfig.phoneNumber} -> ${serverConfig.userPhoneNumber}`);
-  console.error(`Providers: phone=${serverConfig.providers.phone.name}, tts=${serverConfig.providers.tts.name}, stt=${serverConfig.providers.stt.name}`);
+  console.error(`[callme:${instanceId}] CallMe MCP server ready (port ${port})`);
+  console.error(`[callme:${instanceId}] Phone: ${serverConfig.phoneNumber} -> ${serverConfig.userPhoneNumber}`);
+  console.error(`[callme:${instanceId}] Providers: phone=${serverConfig.providers.phone.name}, tts=${serverConfig.providers.tts.name}, stt=${serverConfig.providers.stt.name}`);
   console.error('');
 
   // Graceful shutdown
   const shutdown = async () => {
-    console.error('\nShutting down...');
+    console.error(`\n[callme:${instanceId}] Shutting down...`);
     callManager.shutdown();
     await stopNgrok();
     process.exit(0);
