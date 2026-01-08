@@ -36,6 +36,11 @@ export interface PhoneProvider {
    * Get XML response for connecting media stream (used in webhooks)
    */
   getStreamConnectXml(streamUrl: string): string;
+
+  /**
+   * Answer an incoming call
+   */
+  answerCall(callControlId: string): Promise<void>;
 }
 
 export interface PhoneConfig {
@@ -104,6 +109,7 @@ export interface STTConfig {
   apiUrl?: string;
   model?: string;
   silenceDurationMs?: number;
+  language?: string;  // ISO-639-1 language code (e.g., 'en', 'fr', 'es')
 }
 
 /**

@@ -77,6 +77,16 @@ export class TwilioPhoneProvider implements PhoneProvider {
   }
 
   /**
+   * Answer an incoming call for Twilio.
+   * Note: For Twilio, calls are answered via TwiML response in the webhook,
+   * not via a separate API call. This method is a no-op for Twilio.
+   */
+  async answerCall(_callControlId: string): Promise<void> {
+    // Twilio answers calls via TwiML response in the webhook
+    // This is a no-op for Twilio
+  }
+
+  /**
    * Hang up a call using Twilio REST API
    */
   async hangup(callSid: string): Promise<void> {

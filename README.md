@@ -103,6 +103,7 @@ Add these to `~/.claude/settings.json` (recommended) or export them in your shel
 | `CALLME_NGROK_DOMAIN` | - | Custom ngrok domain (paid feature) |
 | `CALLME_TRANSCRIPT_TIMEOUT_MS` | `180000` | Timeout for user speech (3 minutes) |
 | `CALLME_STT_SILENCE_DURATION_MS` | `800` | Silence duration to detect end of speech |
+| `CALLME_STT_LANGUAGE` | - | Language code for STT (ISO-639-1: en, fr, es, de, etc.) |
 | `CALLME_TELNYX_PUBLIC_KEY` | - | Telnyx public key for webhook signature verification (recommended) |
 
 ### 4. Install Plugin
@@ -137,6 +138,51 @@ Plugin ────stdio──────────────────�
 ```
 
 The MCP server runs locally and automatically creates an ngrok tunnel for phone provider webhooks.
+
+---
+
+## Incoming Call Support
+
+CallMe can also receive incoming calls! When you call the configured phone number:
+- The call is automatically answered
+- Claude immediately starts listening (no greeting message)
+- Use `list_active_calls` to discover the incoming call
+- Use `continue_call` to respond to the user
+- Use `end_call` to hang up
+
+### Configuration
+
+Incoming calls are enabled by default. To disable:
+
+```bash
+CALLME_ENABLE_INCOMING_CALLS=false
+```
+
+To restrict incoming calls to specific numbers:
+
+```bash
+CALLME_ALLOWED_CALLERS=+15559876543,+15551112222
+```
+
+By default, only the number in `CALLME_USER_PHONE_NUMBER` can call.
+
+### Provider Setup
+
+**Telnyx:**
+- Ensure your Telnyx phone number is configured to receive incoming calls
+- The webhook URL must be set in your Telnyx Voice Application settings
+
+**Twilio:**
+- Configure your Twilio phone number's voice URL to your ngrok webhook
+- Ensure the webhook is set to handle incoming voice calls
+
+### Usage Example
+
+1. Call your configured phone number from your verified number
+2. The call is automatically answered
+3. Speak your instruction to Claude
+4. Use the `list_active_calls` tool in Claude Code to see the incoming call
+5. Use `continue_call` with the call ID to respond
 
 ---
 
@@ -187,6 +233,86 @@ await end_call({
   message: "Perfect, I'll get started. Talk soon!"
 });
 ```
+
+### `list_active_calls`
+List all active phone calls (both outbound and incoming). Use this to discover incoming calls from users.
+
+```typescript
+const { activeCalls } = await list_active_calls();
+// Returns:
+// {
+//   activeCalls: [
+//     {
+//       callId: 'call-1-1234567890',
+//       direction: 'outbound',
+//       userPhoneNumber: '+15559876543',
+//       startTime: '2025-01-08T10:30:00Z',
+//       durationSeconds: 45
+//     },
+//     {
+//       callId: 'call-inbound-2-1234567891',
+//       direction: 'inbound',
+//       userPhoneNumber: '+15551112222',
+//       startTime: '2025-01-08T10:31:00Z',
+//       durationSeconds: 30
+//     }
+//   ]
+// }
+```
+
+---
+
+## Multilingual Support
+
+CallMe supports multiple languages for speech recognition and synthesis.
+
+### Speech-to-Text (STT) Language Configuration
+
+The speech recognition service (OpenAI Realtime API) supports multiple languages. You can specify the language to improve transcription accuracy and reduce latency.
+
+**Environment Variable:**
+```bash
+CALLME_STT_LANGUAGE=fr  # ISO-639-1 language code
+```
+
+**Supported Languages:**
+- `en` - English
+- `fr` - French
+- `es` - Spanish
+- `de` - German
+- `it` - Italian
+- `pt` - Portuguese
+- `zh` - Chinese
+- `ja` - Japanese
+- `ko` - Korean
+- `ru` - Russian
+- And more...
+
+**Behavior:**
+- If not specified, OpenAI will auto-detect the language (slower, less accurate)
+- Specifying a language improves transcription accuracy
+- Reduces latency by skipping language detection step
+
+**Example Configuration (French):**
+```json
+{
+  "env": {
+    "CALLME_OPENAI_API_KEY": "sk-...",
+    "CALLME_STT_LANGUAGE": "fr"
+  }
+}
+```
+
+### Text-to-Speech (TTS) Voices
+
+**Default (OpenAI TTS):**
+- Supports English voices only
+- Available voices: alloy, echo, fable, onyx, nova, shimmer
+- Configured via `CALLME_TTS_VOICE`
+
+**For multilingual TTS support, Amazon Polly is available as an alternative provider.**
+
+See [Amazon Polly TTS Setup](#amazon-polly-tts-setup) below for details on using French or other languages.
 
 ---
 
