@@ -1,19 +1,80 @@
 # CallMe
 
-**Minimal plugin that lets Claude Code call you on the phone.**
+**Minimal plugin that lets Claude Code call you on the phone or message you on Telegram.**
 
-Start a task, walk away. Your phone/watch rings when Claude is done, stuck, or needs a decision.
+Start a task, walk away. Your phone rings (or Telegram pings) when Claude is done, stuck, or needs a decision.
 
 <img src="./call-me-comic-min.png" width="800" alt="CallMe comic strip">
 
-- **Minimal plugin** - Does one thing: call you on the phone. No crazy setups.
+- **Two modes** - Phone calls (voice) or Telegram (text) - your choice!
 - **Multi-turn conversations** - Talk through decisions naturally.
-- **Works anywhere** - Smartphone, smartwatch, or even landline!
-- **Tool-use composable** - Claude can e.g. do a web search while on a call with you.
+- **Works anywhere** - Smartphone, smartwatch, landline, or Telegram!
+- **Tool-use composable** - Claude can e.g. do a web search while on a call/chat with you.
 
 ---
 
 ## Quick Start
+
+Choose your mode:
+
+| Mode | Cost | Setup Time | Best For |
+|------|------|------------|----------|
+| **Telegram** | Free | 2 minutes | Text-based, quick responses |
+| **Phone** | ~$0.03/min | 10 minutes | Voice, hands-free, away from computer |
+
+---
+
+## Option A: Telegram Mode (Recommended for Quick Start)
+
+### 1. Create a Telegram Bot
+
+1. Open Telegram and message [@BotFather](https://t.me/BotFather)
+2. Send `/newbot` and follow the prompts
+3. Copy the **bot token** (looks like `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`)
+
+### 2. Get Your Chat ID
+
+1. Message [@userinfobot](https://t.me/userinfobot) on Telegram
+2. Copy your **user ID** (a number like `123456789`)
+
+### 3. Configure MCP Server
+
+Add to `~/.claude.json` (create if it doesn't exist):
+
+```json
+{
+  "mcpServers": {
+    "callme-telegram": {
+      "type": "stdio",
+      "command": "bunx",
+      "args": ["--bun", "callme-mcp@latest", "telegram"],
+      "env": {
+        "CALLME_TELEGRAM_BOT_TOKEN": "123456789:ABCdefGHIjklMNOpqrsTUVwxyz",
+        "CALLME_TELEGRAM_CHAT_ID": "123456789"
+      }
+    }
+  }
+}
+```
+
+**Optional**: Add these env vars for extra features:
+```json
+"env": {
+  ...
+  "CALLME_TELEGRAM_VERBOSE": "true",
+  "CALLME_TELEGRAM_LISTEN": "true"
+}
+```
+- `CALLME_TELEGRAM_VERBOSE` - Stream all Claude output to Telegram
+- `CALLME_TELEGRAM_LISTEN` - Enable two-way communication (send tasks via Telegram)
+
+### 4. Restart Claude Code
+
+Run `/mcp` to verify `callme-telegram` is connected. Done!
+
+---
+
+## Option B: Phone Mode
 
 ### 1. Get Required Accounts
 
@@ -64,20 +125,27 @@ CALLME_PHONE_AUTH_TOKEN=<Auth Token>
 
 </details>
 
-### 3. Set Environment Variables
+### 3. Configure MCP Server
 
-Add these to `~/.claude/settings.json` (recommended) or export them in your shell:
+Add to `~/.claude.json`:
 
 ```json
 {
-  "env": {
-    "CALLME_PHONE_PROVIDER": "telnyx",
-    "CALLME_PHONE_ACCOUNT_SID": "your-connection-id-or-account-sid",
-    "CALLME_PHONE_AUTH_TOKEN": "your-api-key-or-auth-token",
-    "CALLME_PHONE_NUMBER": "+15551234567",
-    "CALLME_USER_PHONE_NUMBER": "+15559876543",
-    "CALLME_OPENAI_API_KEY": "sk-...",
-    "CALLME_NGROK_AUTHTOKEN": "your-ngrok-token"
+  "mcpServers": {
+    "callme": {
+      "type": "stdio",
+      "command": "bunx",
+      "args": ["--bun", "callme-mcp@latest"],
+      "env": {
+        "CALLME_PHONE_PROVIDER": "telnyx",
+        "CALLME_PHONE_ACCOUNT_SID": "your-connection-id-or-account-sid",
+        "CALLME_PHONE_AUTH_TOKEN": "your-api-key-or-auth-token",
+        "CALLME_PHONE_NUMBER": "+15551234567",
+        "CALLME_USER_PHONE_NUMBER": "+15559876543",
+        "CALLME_OPENAI_API_KEY": "sk-...",
+        "CALLME_NGROK_AUTHTOKEN": "your-ngrok-token"
+      }
+    }
   }
 }
 ```
@@ -105,14 +173,9 @@ Add these to `~/.claude/settings.json` (recommended) or export them in your shel
 | `CALLME_STT_SILENCE_DURATION_MS` | `800` | Silence duration to detect end of speech |
 | `CALLME_TELNYX_PUBLIC_KEY` | - | Telnyx public key for webhook signature verification (recommended) |
 
-### 4. Install Plugin
+### 4. Restart Claude Code
 
-```bash
-/plugin marketplace add ZeframLou/call-me
-/plugin install callme@callme
-```
-
-Restart Claude Code. Done!
+Run `/mcp` to verify `callme` is connected. Done!
 
 ---
 
@@ -140,7 +203,84 @@ The MCP server runs locally and automatically creates an ngrok tunnel for phone 
 
 ---
 
-## Tools
+## Telegram Tools
+
+### `broadcast`
+Send a one-way message without waiting for response or managing chat state. Perfect for status updates and streaming output.
+
+```typescript
+await broadcast({
+  message: "Starting to analyze the codebase..."
+});
+```
+
+**Verbose Mode**: Set `CALLME_TELEGRAM_VERBOSE=true` or use `/verbose on` in Telegram to enable streaming mode.
+
+### `send_message`
+Start a Telegram conversation.
+
+```typescript
+const { chatId, response } = await send_message({
+  message: "Hey! I finished the auth system. What should I work on next?"
+});
+```
+
+### `continue_chat`
+Continue with follow-up questions.
+
+```typescript
+const response = await continue_chat({
+  chat_id: chatId,
+  message: "Got it. Should I add rate limiting too?"
+});
+```
+
+### `notify_user`
+Send a message without waiting for response.
+
+```typescript
+await notify_user({
+  chat_id: chatId,
+  message: "Let me search for that information..."
+});
+```
+
+### `end_chat`
+End the conversation.
+
+```typescript
+await end_chat({
+  chat_id: chatId,
+  message: "Perfect, I'll get started. Talk soon!"
+});
+```
+
+### `listen_for_commands`
+Wait for the user to send a task via Telegram (requires `CALLME_TELEGRAM_LISTEN=true`).
+
+```typescript
+// Tell Claude: "Listen for my commands via Telegram"
+const command = await listen_for_commands({
+  prompt: "Ready for your next task!"
+});
+// Claude receives: "Find all TODOs in the code"
+// Claude executes the task, broadcasts progress, then listens again
+```
+
+### Telegram Slash Commands
+
+Control the bot anytime from Telegram:
+
+| Command | Description |
+|---------|-------------|
+| `/verbose on` | Enable verbose mode (stream all output) |
+| `/verbose off` | Disable verbose mode |
+| `/verbose` | Show current verbose mode status |
+| `/help` | Show available commands |
+
+---
+
+## Phone Tools
 
 ### `initiate_call`
 Start a phone call.
@@ -208,9 +348,10 @@ Plus OpenAI costs (same for both providers):
 ## Troubleshooting
 
 ### Claude doesn't use the tool
-1. Check all required environment variables are set (ideally in `~/.claude/settings.json`)
-2. Restart Claude Code after installing the plugin
-3. Try explicitly: "Call me to discuss the next steps when you're done."
+1. Run `/mcp` to verify the MCP server is connected
+2. Check all required environment variables are set in `~/.claude.json`
+3. Restart Claude Code after configuration changes
+4. Try explicitly: "Call me to discuss the next steps when you're done."
 
 ### Call doesn't connect
 1. Check the MCP server logs (stderr) with `claude --debug`

@@ -12,6 +12,7 @@ import { OpenAITTSProvider } from './tts-openai.js';
 import { OpenAIRealtimeSTTProvider } from './stt-openai-realtime.js';
 
 export * from './types.js';
+export * from './telegram.js';
 
 export type PhoneProviderType = 'telnyx' | 'twilio';
 
