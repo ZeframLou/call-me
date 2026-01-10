@@ -1,14 +1,14 @@
 {
   "name": "callme",
-  "version": "1.0.2",
-  "description": "Claude calls you on the phone when it needs your input or wants to report progress",
+  "version": "1.1.0",
+  "description": "Claude calls you on the phone or messages you on Telegram when it needs your input or wants to report progress"
   "author": {
     "name": "ZeframLou",
     "url": "https://github.com/ZeframLou"
   },
   "repository": "https://github.com/ZeframLou/call-me",
   "license": "MIT",
-  "keywords": ["phone", "voice", "calls", "input"],
+  "keywords": ["phone", "voice", "calls", "telegram", "chat", "input"],
   "skills": "./skills",
   "mcpServers": {
     "callme": {
@@ -26,6 +26,15 @@
         "CALLME_TRANSCRIPT_TIMEOUT_MS": "${CALLME_TRANSCRIPT_TIMEOUT_MS:-180000}",
         "CALLME_STT_SILENCE_DURATION_MS": "${CALLME_STT_SILENCE_DURATION_MS:-800}"
       }
+    },
+    "callme-telegram": {
+      "command": "bash",
+      "args": ["-c", "cd ${CLAUDE_PLUGIN_ROOT}/server && bun install --silent && bun run src/index-telegram.ts"],
+      "env": {
+        "CALLME_TELEGRAM_BOT_TOKEN": "${CALLME_TELEGRAM_BOT_TOKEN}",
+        "CALLME_TELEGRAM_CHAT_ID": "${CALLME_TELEGRAM_CHAT_ID}",
+        "CALLME_RESPONSE_TIMEOUT_MS": "${CALLME_RESPONSE_TIMEOUT_MS:-300000}"
+      }
     }
   },
   "hooks": {
@@ -34,7 +43,7 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "SILENTLY evaluate if you should call the user. ONLY use initiate_call if you completed significant work and need to discuss next steps, or are genuinely blocked. Do NOT output any text - either call or do nothing."
+            "prompt": "SILENTLY evaluate if you should contact the user. ONLY use initiate_call (phone) or send_message (telegram) if you completed significant work and need to discuss next steps, or are genuinely blocked. Do NOT output any text - either contact or do nothing."
           }
         ]
       }

@@ -6,6 +6,12 @@
   "plugins": [
     {
       "name": "callme",
+      "description": "Phone calls mode - Claude calls you",
+      "source": "./"
+    },
+    {
+      "name": "callme-telegram",
+      "description": "Telegram mode - Claude messages you (free, text-based)",
       "source": "./"
     }
   ]
