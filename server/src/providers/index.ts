@@ -3,6 +3,7 @@
  *
  * Creates and configures providers based on environment variables.
  * Supports Telnyx or Twilio for phone, OpenAI for TTS and Realtime STT.
+ * Also exports Slack provider for text-based messaging.
  */
 
 import type { PhoneProvider, TTSProvider, RealtimeSTTProvider, ProviderRegistry } from './types.js';
@@ -12,6 +13,7 @@ import { OpenAITTSProvider } from './tts-openai.js';
 import { OpenAIRealtimeSTTProvider } from './stt-openai-realtime.js';
 
 export * from './types.js';
+export * from './slack.js';
 
 export type PhoneProviderType = 'telnyx' | 'twilio';
 

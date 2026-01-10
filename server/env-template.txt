@@ -1,0 +1,21 @@
+# Slack Configuration for CallMe
+# 
+# To use: Copy this to .env in the same directory:
+#   cp env-template.txt .env
+#
+# Then edit .env with your actual values.
+
+# Bot User OAuth Token (OAuth & Permissions → Bot User OAuth Token)
+# Starts with xoxb-
+CALLME_SLACK_BOT_TOKEN=xoxb-your-bot-token
+
+# App-Level Token for Socket Mode (Socket Mode → App-Level Tokens)
+# Generate one with connections:write scope - starts with xapp-
+CALLME_SLACK_APP_TOKEN=xapp-your-app-token
+
+# Your Slack User ID (Profile → ⋮ menu → Copy member ID)
+# Starts with U
+CALLME_SLACK_USER_ID=U12345678
+
+# Optional: Response timeout in milliseconds (default: 5 minutes)
+# CALLME_SLACK_RESPONSE_TIMEOUT_MS=300000
