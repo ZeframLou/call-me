@@ -231,6 +231,8 @@ Plugin ────stdio──────────────────�
 
 ### Slack Mode
 
+[Slack Mode Comic](./futuristic-slack-comic.png)
+
 ```
 Claude Code                    CallMe Slack MCP Server (local)
     │                                    │
