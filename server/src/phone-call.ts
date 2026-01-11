@@ -74,6 +74,13 @@ export function loadServerConfig(publicUrl: string): ServerConfig {
   };
 }
 
+interface IncomingSMS {
+  from: string;
+  body: string;
+  timestamp: number;
+  sid: string;
+}
+
 export class CallManager {
   private activeCalls = new Map<string, CallState>();
   private callControlIdToCallId = new Map<string, string>();
@@ -82,6 +89,7 @@ export class CallManager {
   private wss: WebSocketServer | null = null;
   private config: ServerConfig;
   private currentCallId = 0;
+  private incomingSmsQueue: IncomingSMS[] = [];  // Queue for incoming SMS
 
   constructor(config: ServerConfig) {
     this.config = config;
@@ -93,6 +101,11 @@ export class CallManager {
 
       if (url.pathname === '/twiml') {
         this.handlePhoneWebhook(req, res);
+        return;
+      }
+
+      if (url.pathname === '/sms') {
+        this.handleSmsWebhook(req, res);
         return;
       }
 
@@ -467,6 +480,76 @@ export class CallManager {
     } catch (error) {
       console.error(`Error handling webhook ${eventType}:`, error);
     }
+  }
+
+  /**
+   * Handle incoming SMS webhook from Twilio
+   */
+  private handleSmsWebhook(req: IncomingMessage, res: ServerResponse): void {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      try {
+        const params = new URLSearchParams(body);
+        const from = params.get('From') || '';
+        const smsBody = params.get('Body') || '';
+        const messageSid = params.get('MessageSid') || '';
+
+        console.error(`[SMS] Received from ${from}: ${smsBody}`);
+
+        // Add to queue
+        this.incomingSmsQueue.push({
+          from,
+          body: smsBody,
+          timestamp: Date.now(),
+          sid: messageSid,
+        });
+
+        // Keep only last 50 messages
+        if (this.incomingSmsQueue.length > 50) {
+          this.incomingSmsQueue.shift();
+        }
+
+        // Respond with empty TwiML (no auto-reply)
+        res.writeHead(200, { 'Content-Type': 'application/xml' });
+        res.end('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+      } catch (error) {
+        console.error('[SMS] Error handling webhook:', error);
+        res.writeHead(500);
+        res.end('Error');
+      }
+    });
+  }
+
+  /**
+   * Get pending SMS messages (for MCP tool)
+   */
+  getMessages(): IncomingSMS[] {
+    const messages = [...this.incomingSmsQueue];
+    this.incomingSmsQueue = [];  // Clear after reading
+    return messages;
+  }
+
+  /**
+   * Check if there are pending messages (for MCP tool)
+   */
+  hasMessages(): boolean {
+    return this.incomingSmsQueue.length > 0;
+  }
+
+  /**
+   * Send an SMS message (for MCP tool)
+   */
+  async sendSms(message: string): Promise<void> {
+    if (!this.config.providers.phone.sendSMS) {
+      throw new Error('SMS not supported by current phone provider');
+    }
+    await this.config.providers.phone.sendSMS(
+      this.config.userPhoneNumber,
+      this.config.phoneNumber,
+      message
+    );
+    console.error(`[SMS] Sent to ${this.config.userPhoneNumber}: ${message}`);
   }
 
   async initiateCall(message: string): Promise<{ callId: string; response: string }> {
