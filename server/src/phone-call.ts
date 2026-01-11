@@ -27,6 +27,8 @@ interface CallState {
   startTime: number;
   hungUp: boolean;
   sttSession: RealtimeSTTSession | null;
+  pendingMessage: string;  // Message to send as SMS if call not answered
+  answeredByMachine: boolean;  // Track if voicemail/machine answered
 }
 
 export interface ServerConfig {
@@ -37,6 +39,7 @@ export interface ServerConfig {
   providers: ProviderRegistry;
   providerConfig: ProviderConfig;  // For webhook signature verification
   transcriptTimeoutMs: number;
+  smsFallback: boolean;  // Send SMS if call not answered
 }
 
 export function loadServerConfig(publicUrl: string): ServerConfig {
@@ -56,6 +59,9 @@ export function loadServerConfig(publicUrl: string): ServerConfig {
   // Default 3 minutes for transcript timeout
   const transcriptTimeoutMs = parseInt(process.env.CALLME_TRANSCRIPT_TIMEOUT_MS || '180000', 10);
 
+  // SMS fallback enabled by default, set CALLME_SMS_FALLBACK=false to disable
+  const smsFallback = process.env.CALLME_SMS_FALLBACK !== 'false';
+
   return {
     publicUrl,
     port: parseInt(process.env.CALLME_PORT || '3333', 10),
@@ -64,6 +70,7 @@ export function loadServerConfig(publicUrl: string): ServerConfig {
     providers,
     providerConfig,
     transcriptTimeoutMs,
+    smsFallback,
   };
 }
 
@@ -120,7 +127,8 @@ export class CallManager {
           console.error(`[Security] WebSocket token validated for call ${callId}`);
         } else if (!callId) {
           // Token missing or not found - only allow fallback for ngrok free tier
-          const isNgrokFreeTier = new URL(this.config.publicUrl).hostname.endsWith('.ngrok-free.dev');
+          const hostname = new URL(this.config.publicUrl).hostname;
+          const isNgrokFreeTier = hostname.endsWith('.ngrok-free.dev') || hostname.endsWith('.ngrok-free.app');
           if (isNgrokFreeTier) {
             // Fallback: find the most recent active call (ngrok compatibility mode)
             // Token lookup can fail due to timing issues with ngrok's free tier
@@ -281,7 +289,8 @@ export class CallManager {
           const webhookUrl = `${this.config.publicUrl}/twiml`;
 
           if (!validateTwilioSignature(authToken, signature, webhookUrl, params)) {
-            const isNgrokFreeTier = new URL(this.config.publicUrl).hostname.endsWith('.ngrok-free.dev');
+            const hostname = new URL(this.config.publicUrl).hostname;
+          const isNgrokFreeTier = hostname.endsWith('.ngrok-free.dev') || hostname.endsWith('.ngrok-free.app');
             if (isNgrokFreeTier) {
               // Only log if ngrok free tier is used
               // Log for debugging but proceed anyway - ngrok free tier causes signature mismatches
@@ -313,8 +322,21 @@ export class CallManager {
   private async handleTwilioWebhook(params: URLSearchParams, res: ServerResponse): Promise<void> {
     const callSid = params.get('CallSid');
     const callStatus = params.get('CallStatus');
+    const answeredBy = params.get('AnsweredBy');  // AMD result: human, machine_start, machine_end_beep, etc.
 
-    console.error(`Twilio webhook: CallSid=${callSid}, CallStatus=${callStatus}`);
+    console.error(`Twilio webhook: CallSid=${callSid}, CallStatus=${callStatus}, AnsweredBy=${answeredBy}`);
+
+    // Track AMD result when we receive it (comes in early webhooks, not in "completed")
+    if (callSid && answeredBy?.startsWith('machine')) {
+      const callId = this.callControlIdToCallId.get(callSid);
+      if (callId) {
+        const state = this.activeCalls.get(callId);
+        if (state) {
+          state.answeredByMachine = true;
+          console.error(`[${callId}] AMD detected: ${answeredBy}`);
+        }
+      }
+    }
 
     // Handle call status updates
     if (callStatus === 'completed' || callStatus === 'busy' || callStatus === 'no-answer' || callStatus === 'failed') {
@@ -325,6 +347,31 @@ export class CallManager {
           this.callControlIdToCallId.delete(callSid);
           const state = this.activeCalls.get(callId);
           if (state) {
+            // Determine if we should send SMS fallback:
+            // - no-answer, busy, failed: call didn't connect
+            // - completed + machine: voicemail answered (tracked from earlier AMD webhook)
+            const callNotAnsweredByHuman =
+              callStatus === 'no-answer' ||
+              callStatus === 'busy' ||
+              callStatus === 'failed' ||
+              (callStatus === 'completed' && state.answeredByMachine);
+
+            // Send SMS fallback if call was not answered by human and SMS fallback is enabled
+            if (callNotAnsweredByHuman &&
+                this.config.smsFallback &&
+                state.pendingMessage &&
+                this.config.providers.phone.sendSMS) {
+              try {
+                await this.config.providers.phone.sendSMS(
+                  state.userPhoneNumber,
+                  this.config.phoneNumber,
+                  `[Claude] ${state.pendingMessage}`
+                );
+                console.error(`[${callId}] Call ${callStatus} (machine: ${state.answeredByMachine}), sent SMS fallback`);
+              } catch (error) {
+                console.error(`[${callId}] Failed to send SMS fallback:`, error);
+              }
+            }
             state.hungUp = true;
             state.ws?.close();
           }
@@ -445,6 +492,8 @@ export class CallManager {
       startTime: Date.now(),
       hungUp: false,
       sttSession,
+      pendingMessage: message,  // Store for SMS fallback if call not answered
+      answeredByMachine: false,  // Will be set true if AMD detects voicemail
     };
 
     this.activeCalls.set(callId, state);
@@ -510,6 +559,23 @@ export class CallManager {
 
     // Wait for audio to finish playing before hanging up (prevent cutoff)
     await new Promise((resolve) => setTimeout(resolve, 2000));
+
+    // Send SMS fallback if call was answered by machine (voicemail)
+    if (state.answeredByMachine &&
+        this.config.smsFallback &&
+        state.pendingMessage &&
+        this.config.providers.phone.sendSMS) {
+      try {
+        await this.config.providers.phone.sendSMS(
+          state.userPhoneNumber,
+          this.config.phoneNumber,
+          `[Claude] ${state.pendingMessage}`
+        );
+        console.error(`[${callId}] Voicemail detected, sent SMS fallback`);
+      } catch (error) {
+        console.error(`[${callId}] Failed to send SMS fallback:`, error);
+      }
+    }
 
     // Hang up the call via phone provider
     if (state.callControlId) {
