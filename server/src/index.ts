@@ -42,6 +42,19 @@ async function main() {
   const callManager = new CallManager(serverConfig);
   callManager.startServer();
 
+  // Auto-configure Twilio SMS webhook to point to ngrok URL
+  if (serverConfig.providers.phone.configureSmsWebhook) {
+    try {
+      await serverConfig.providers.phone.configureSmsWebhook(
+        serverConfig.phoneNumber,
+        `${publicUrl}/sms`
+      );
+    } catch (error) {
+      console.error('Warning: Failed to configure SMS webhook:', error instanceof Error ? error.message : error);
+      console.error('Inbound SMS will not work until manually configured.');
+    }
+  }
+
   // Create stdio MCP server
   const mcpServer = new Server(
     { name: 'callme', version: '3.0.0' },
@@ -102,6 +115,25 @@ async function main() {
             required: ['call_id', 'message'],
           },
         },
+        {
+          name: 'check_messages',
+          description: 'Check for SMS messages from the user. Use this to see if the user replied to a previous SMS or voicemail fallback. Returns any pending messages and clears the queue.',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+          },
+        },
+        {
+          name: 'send_sms',
+          description: 'Send an SMS text message to the user. Use this for async communication when a phone call is not needed.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              message: { type: 'string', description: 'The text message to send' },
+            },
+            required: ['message'],
+          },
+        },
       ],
     };
   });
@@ -145,6 +177,34 @@ async function main() {
 
         return {
           content: [{ type: 'text', text: `Call ended. Duration: ${durationSeconds}s` }],
+        };
+      }
+
+      if (request.params.name === 'check_messages') {
+        const messages = callManager.getMessages();
+
+        if (messages.length === 0) {
+          return {
+            content: [{ type: 'text', text: 'No pending messages.' }],
+          };
+        }
+
+        const formatted = messages.map(m => {
+          const time = new Date(m.timestamp).toLocaleTimeString();
+          return `[${time}] ${m.from}: ${m.body}`;
+        }).join('\n');
+
+        return {
+          content: [{ type: 'text', text: `${messages.length} message(s) received:\n\n${formatted}` }],
+        };
+      }
+
+      if (request.params.name === 'send_sms') {
+        const { message } = request.params.arguments as { message: string };
+        await callManager.sendSms(message);
+
+        return {
+          content: [{ type: 'text', text: `SMS sent: "${message}"` }],
         };
       }
 
