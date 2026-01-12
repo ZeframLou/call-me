@@ -41,6 +41,11 @@ export interface PhoneProvider {
    * Send an SMS message (optional - for fallback when call not answered)
    */
   sendSMS?(to: string, from: string, message: string): Promise<void>;
+
+  /**
+   * Configure the phone number's SMS webhook URL (optional - for auto-config on startup)
+   */
+  configureSmsWebhook?(phoneNumber: string, webhookUrl: string): Promise<void>;
 }
 
 export interface PhoneConfig {

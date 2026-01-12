@@ -42,6 +42,19 @@ async function main() {
   const callManager = new CallManager(serverConfig);
   callManager.startServer();
 
+  // Auto-configure Twilio SMS webhook to point to ngrok URL
+  if (serverConfig.providers.phone.configureSmsWebhook) {
+    try {
+      await serverConfig.providers.phone.configureSmsWebhook(
+        serverConfig.phoneNumber,
+        `${publicUrl}/sms`
+      );
+    } catch (error) {
+      console.error('Warning: Failed to configure SMS webhook:', error instanceof Error ? error.message : error);
+      console.error('Inbound SMS will not work until manually configured.');
+    }
+  }
+
   // Create stdio MCP server
   const mcpServer = new Server(
     { name: 'callme', version: '3.0.0' },

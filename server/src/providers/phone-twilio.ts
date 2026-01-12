@@ -158,4 +158,59 @@ export class TwilioPhoneProvider implements PhoneProvider {
 
     console.error(`[SMS] Sent to ${to}: ${message.substring(0, 50)}...`);
   }
+
+  /**
+   * Configure the phone number's SMS webhook URL
+   * This auto-updates the Twilio number to point to the ngrok URL
+   */
+  async configureSmsWebhook(phoneNumber: string, webhookUrl: string): Promise<void> {
+    if (!this.accountSid || !this.authToken) {
+      throw new Error('Twilio not initialized');
+    }
+
+    const auth = Buffer.from(`${this.accountSid}:${this.authToken}`).toString('base64');
+
+    // First, look up the phone number SID
+    const lookupResponse = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${this.accountSid}/IncomingPhoneNumbers.json?PhoneNumber=${encodeURIComponent(phoneNumber)}`,
+      {
+        headers: { 'Authorization': `Basic ${auth}` },
+      }
+    );
+
+    if (!lookupResponse.ok) {
+      const error = await lookupResponse.text();
+      throw new Error(`Failed to lookup phone number: ${lookupResponse.status} ${error}`);
+    }
+
+    const lookupData = await lookupResponse.json() as { incoming_phone_numbers: Array<{ sid: string }> };
+    if (!lookupData.incoming_phone_numbers?.length) {
+      throw new Error(`Phone number ${phoneNumber} not found in account`);
+    }
+
+    const phoneSid = lookupData.incoming_phone_numbers[0].sid;
+
+    // Update the SMS webhook URL
+    const updateResponse = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${this.accountSid}/IncomingPhoneNumbers/${phoneSid}.json`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Basic ${auth}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+          SmsUrl: webhookUrl,
+          SmsMethod: 'POST',
+        }).toString(),
+      }
+    );
+
+    if (!updateResponse.ok) {
+      const error = await updateResponse.text();
+      throw new Error(`Failed to update SMS webhook: ${updateResponse.status} ${error}`);
+    }
+
+    console.error(`[Twilio] Configured SMS webhook: ${webhookUrl}`);
+  }
 }
