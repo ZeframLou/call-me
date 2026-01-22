@@ -4,37 +4,53 @@
  * CallMe MCP Server
  *
  * A stdio-based MCP server that lets Claude call you on the phone.
- * Automatically starts ngrok to expose webhooks for phone providers.
+ * Automatically starts a tunnel to expose webhooks for phone providers.
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { CallManager, loadServerConfig } from './phone-call.js';
-import { startNgrok, stopNgrok } from './ngrok.js';
+import { loadTunnelConfig, createTunnelProvider, validateTunnelConfig, type TunnelProvider } from './tunnels/index.js';
 
 async function main() {
   // Get port for HTTP server
   const port = parseInt(process.env.CALLME_PORT || '3333', 10);
-
-  // Start ngrok tunnel to get public URL
-  console.error('Starting ngrok tunnel...');
-  let publicUrl: string;
-  try {
-    publicUrl = await startNgrok(port);
-    console.error(`ngrok tunnel: ${publicUrl}`);
-  } catch (error) {
-    console.error('Failed to start ngrok:', error instanceof Error ? error.message : error);
+  if (isNaN(port) || port < 1 || port > 65535) {
+    console.error(`Invalid port: ${process.env.CALLME_PORT}. Must be a number between 1 and 65535.`);
     process.exit(1);
   }
 
-  // Load server config with the ngrok URL
+  // Load and validate tunnel configuration
+  const tunnelConfig = loadTunnelConfig();
+  const configErrors = validateTunnelConfig(tunnelConfig);
+  if (configErrors.length > 0) {
+    console.error('Tunnel configuration error:');
+    for (const error of configErrors) {
+      console.error(`  ${error}`);
+    }
+    process.exit(1);
+  }
+
+  // Create and start tunnel
+  const tunnelProvider: TunnelProvider = createTunnelProvider(tunnelConfig);
+  console.error(`Starting ${tunnelProvider.name} tunnel...`);
+  let publicUrl: string;
+  try {
+    publicUrl = await tunnelProvider.start(port);
+    console.error(`${tunnelProvider.name} tunnel: ${publicUrl}`);
+  } catch (error) {
+    console.error(`Failed to start ${tunnelProvider.name}:`, error instanceof Error ? error.message : error);
+    process.exit(1);
+  }
+
+  // Load server config with the tunnel URL
   let serverConfig;
   try {
     serverConfig = loadServerConfig(publicUrl);
   } catch (error) {
     console.error('Configuration error:', error instanceof Error ? error.message : error);
-    await stopNgrok();
+    await tunnelProvider.stop();
     process.exit(1);
   }
 
@@ -172,7 +188,7 @@ async function main() {
   const shutdown = async () => {
     console.error('\nShutting down...');
     callManager.shutdown();
-    await stopNgrok();
+    await tunnelProvider.stop();
     process.exit(0);
   };
 
