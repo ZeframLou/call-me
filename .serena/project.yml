@@ -1,0 +1,35 @@
+languages:
+- typescript
+encoding: utf-8
+ignore_all_files_in_gitignore: true
+ignored_paths: []
+read_only: false
+excluded_tools: []
+initial_prompt: '
+
+  ## Cross-Project Access
+
+
+  You have access to ALL registered projects via the `activate_project` tool.
+
+  When you need to:
+
+  - Reference code from another project: use `activate_project("project-name")` first
+
+  - Search across projects: switch projects and use `search_for_pattern`
+
+  - Compare implementations: activate each project in sequence
+
+
+  Available projects can be seen via `get_current_config`.
+
+  After switching, remember to switch back if needed.
+
+
+  ## Project Context
+
+  This project (call-me) is part of a multi-project workspace.
+
+  '
+project_name: call-me
+included_optional_tools: []
