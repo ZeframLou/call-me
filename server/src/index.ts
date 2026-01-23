@@ -14,55 +14,65 @@ import { CallManager, loadServerConfig } from './phone-call.js';
 import { loadTunnelConfig, createTunnelProvider, validateTunnelConfig, type TunnelProvider } from './tunnels/index.js';
 
 async function main() {
-  // Get port for HTTP server
-  const port = parseInt(process.env.CALLME_PORT || '3333', 10);
-  if (isNaN(port) || port < 1 || port > 65535) {
-    console.error(`Invalid port: ${process.env.CALLME_PORT}. Must be a number between 1 and 65535.`);
-    process.exit(1);
-  }
-
-  // Load and validate tunnel configuration
-  const tunnelConfig = loadTunnelConfig();
-  const configErrors = validateTunnelConfig(tunnelConfig);
-  if (configErrors.length > 0) {
-    console.error('Tunnel configuration error:');
-    for (const error of configErrors) {
-      console.error(`  ${error}`);
-    }
-    process.exit(1);
-  }
-
-  // Create and start tunnel
-  const tunnelProvider: TunnelProvider = createTunnelProvider(tunnelConfig);
-  console.error(`Starting ${tunnelProvider.name} tunnel...`);
-  let publicUrl: string;
-  try {
-    publicUrl = await tunnelProvider.start(port);
-    console.error(`${tunnelProvider.name} tunnel: ${publicUrl}`);
-  } catch (error) {
-    console.error(`Failed to start ${tunnelProvider.name}:`, error instanceof Error ? error.message : error);
-    process.exit(1);
-  }
-
-  // Load server config with the tunnel URL
-  let serverConfig;
-  try {
-    serverConfig = loadServerConfig(publicUrl);
-  } catch (error) {
-    console.error('Configuration error:', error instanceof Error ? error.message : error);
-    await tunnelProvider.stop();
-    process.exit(1);
-  }
-
-  // Create call manager and start HTTP server for webhooks
-  const callManager = new CallManager(serverConfig);
-  callManager.startServer();
-
-  // Create stdio MCP server
+  // Create stdio MCP server FIRST so Claude Code gets the handshake quickly
   const mcpServer = new Server(
     { name: 'callme', version: '3.0.0' },
     { capabilities: { tools: {} } }
   );
+
+  // Variables for deferred initialization
+  let callManager: CallManager | null = null;
+  let tunnelProvider: TunnelProvider | null = null;
+  let initError: string | null = null;
+  let isReady = false;
+
+  // Start async initialization in background
+  const initPromise = (async () => {
+    // Get port for HTTP server
+    const port = parseInt(process.env.CALLME_PORT || '3333', 10);
+    if (isNaN(port) || port < 1 || port > 65535) {
+      throw new Error(`Invalid port: ${process.env.CALLME_PORT}. Must be a number between 1 and 65535.`);
+    }
+
+    // Load and validate tunnel configuration
+    const tunnelConfig = loadTunnelConfig();
+    const configErrors = validateTunnelConfig(tunnelConfig);
+    if (configErrors.length > 0) {
+      throw new Error('Tunnel configuration error:\n  ' + configErrors.join('\n  '));
+    }
+
+    // Create and start tunnel
+    tunnelProvider = createTunnelProvider(tunnelConfig);
+    console.error(`Starting ${tunnelProvider.name} tunnel...`);
+    let publicUrl: string;
+    try {
+      publicUrl = await tunnelProvider.start(port);
+      console.error(`${tunnelProvider.name} tunnel: ${publicUrl}`);
+    } catch (error) {
+      throw new Error(`Failed to start ${tunnelProvider.name}: ${error instanceof Error ? error.message : error}`);
+    }
+
+    // Load server config with the tunnel URL
+    const serverConfig = loadServerConfig(publicUrl);
+
+    // Create call manager and start HTTP server for webhooks
+    callManager = new CallManager(serverConfig);
+    callManager.startServer();
+
+    console.error('');
+    console.error('CallMe MCP server ready');
+    console.error(`Phone: ${serverConfig.phoneNumber} -> ${serverConfig.userPhoneNumber}`);
+    console.error(`Providers: phone=${serverConfig.providers.phone.name}, tts=${serverConfig.providers.tts.name}, stt=${serverConfig.providers.stt.name}`);
+    console.error('');
+
+    isReady = true;
+  })();
+
+  // Handle init errors (log but don't crash - tools will report the error)
+  initPromise.catch((error) => {
+    initError = error instanceof Error ? error.message : String(error);
+    console.error('Initialization error:', initError);
+  });
 
   // List available tools
   mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -124,6 +134,30 @@ async function main() {
 
   // Handle tool calls
   mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
+    // Wait for initialization (with timeout)
+    if (!isReady && !initError) {
+      const timeout = 30000; // 30 second timeout for init
+      const start = Date.now();
+      while (!isReady && !initError && Date.now() - start < timeout) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
+
+    // Check for initialization errors
+    if (initError) {
+      return {
+        content: [{ type: 'text', text: `Server initialization failed: ${initError}` }],
+        isError: true,
+      };
+    }
+
+    if (!callManager) {
+      return {
+        content: [{ type: 'text', text: 'Server not ready yet. Please try again in a moment.' }],
+        isError: true,
+      };
+    }
+
     try {
       if (request.params.name === 'initiate_call') {
         const { message } = request.params.arguments as { message: string };
@@ -178,20 +212,27 @@ async function main() {
   const transport = new StdioServerTransport();
   await mcpServer.connect(transport);
 
-  console.error('');
-  console.error('CallMe MCP server ready');
-  console.error(`Phone: ${serverConfig.phoneNumber} -> ${serverConfig.userPhoneNumber}`);
-  console.error(`Providers: phone=${serverConfig.providers.phone.name}, tts=${serverConfig.providers.tts.name}, stt=${serverConfig.providers.stt.name}`);
-  console.error('');
-
-  // Graceful shutdown
+  // Graceful shutdown with guard to prevent double-execution
+  let shuttingDown = false;
   const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+
     console.error('\nShutting down...');
-    callManager.shutdown();
-    await tunnelProvider.stop();
+    if (callManager) {
+      callManager.shutdown();
+    }
+    if (tunnelProvider) {
+      await tunnelProvider.stop();
+    }
     process.exit(0);
   };
 
+  // Handle stdin close (parent process exited)
+  process.stdin.on('end', shutdown);
+  process.stdin.on('close', shutdown);
+
+  // Handle termination signals
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }
