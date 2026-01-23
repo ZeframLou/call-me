@@ -14,6 +14,60 @@ import {
   generateWebSocketToken,
   validateWebSocketToken,
 } from './webhook-security.js';
+import { resample24kTo8k, pcmToMuLaw } from './audio-utils.js';
+
+/**
+ * Audio and timing constants
+ */
+const AUDIO_CONSTANTS = {
+  /** Chunk size in bytes: 20ms at 8kHz mu-law (8000 samples/sec * 0.020 sec * 1 byte/sample) */
+  CHUNK_SIZE_BYTES: 160,
+  /** Delay between sending audio chunks in ms (matches chunk duration) */
+  CHUNK_SEND_DELAY_MS: 20,
+  /** Delay after sending audio before listening (ensures playback completes) */
+  POST_AUDIO_DELAY_MS: 200,
+  /** Jitter buffer size in ms (accumulate before playback to smooth network timing) */
+  JITTER_BUFFER_MS: 100,
+  /** Samples per resample unit: 6 bytes (3 samples) at 24kHz -> 1 sample at 8kHz */
+  SAMPLES_PER_RESAMPLE: 6,
+} as const;
+
+const TIMEOUT_CONSTANTS = {
+  /** Timeout for WebSocket connection to be established */
+  WS_CONNECTION_TIMEOUT_MS: 15000,
+  /** Interval for checking hangup status */
+  HANGUP_CHECK_INTERVAL_MS: 100,
+  /** Delay before hanging up to allow final audio to play */
+  HANGUP_AUDIO_DELAY_MS: 2000,
+  /** Small delay after speaking before listening */
+  POST_SPEAK_DELAY_MS: 150,
+} as const;
+
+/**
+ * Telnyx webhook event types
+ */
+interface TelnyxWebhookEvent {
+  data: {
+    event_type: string;
+    payload: {
+      call_control_id: string;
+      result?: string;
+      [key: string]: unknown;
+    };
+  };
+}
+
+/**
+ * Twilio WebSocket media message
+ */
+interface TwilioMediaMessage {
+  event: 'start' | 'media' | 'stop' | 'mark';
+  streamSid?: string;
+  media?: {
+    payload: string;
+    track?: 'inbound' | 'outbound' | 'inbound_track' | 'outbound_track';
+  };
+}
 
 interface CallState {
   callId: string;
@@ -27,6 +81,7 @@ interface CallState {
   startTime: number;
   hungUp: boolean;
   sttSession: RealtimeSTTSession | null;
+  hangupCheckInterval: ReturnType<typeof setInterval> | null;  // For cleanup on transcript resolution
 }
 
 export interface ServerConfig {
@@ -37,6 +92,8 @@ export interface ServerConfig {
   providers: ProviderRegistry;
   providerConfig: ProviderConfig;  // For webhook signature verification
   transcriptTimeoutMs: number;
+  /** Allow unsigned webhooks (INSECURE - only for development/testing) */
+  allowUnsignedWebhooks: boolean;
 }
 
 export function loadServerConfig(publicUrl: string): ServerConfig {
@@ -56,6 +113,13 @@ export function loadServerConfig(publicUrl: string): ServerConfig {
   // Default 3 minutes for transcript timeout
   const transcriptTimeoutMs = parseInt(process.env.CALLME_TRANSCRIPT_TIMEOUT_MS || '180000', 10);
 
+  // Explicit opt-in for insecure mode (skipping webhook signature validation)
+  const allowUnsignedWebhooks = process.env.CALLME_ALLOW_UNSIGNED_WEBHOOKS === 'true';
+  if (allowUnsignedWebhooks) {
+    console.error('[Security] WARNING: CALLME_ALLOW_UNSIGNED_WEBHOOKS is enabled!');
+    console.error('[Security] Webhook signature validation is DISABLED. Only use for development.');
+  }
+
   return {
     publicUrl,
     port: parseInt(process.env.CALLME_PORT || '3333', 10),
@@ -64,6 +128,7 @@ export function loadServerConfig(publicUrl: string): ServerConfig {
     providers,
     providerConfig,
     transcriptTimeoutMs,
+    allowUnsignedWebhooks,
   };
 }
 
@@ -119,23 +184,22 @@ export class CallManager {
           }
           console.error(`[Security] WebSocket token validated for call ${callId}`);
         } else if (!callId) {
-          // Token missing or not found - only allow fallback for ngrok free tier
-          const isNgrokFreeTier = new URL(this.config.publicUrl).hostname.endsWith('.ngrok-free.dev');
-          if (isNgrokFreeTier) {
-            // Fallback: find the most recent active call (ngrok compatibility mode)
-            // Token lookup can fail due to timing issues with ngrok's free tier
+          // Token missing or not found - only allow fallback if explicitly opted in
+          if (this.config.allowUnsignedWebhooks) {
+            // Fallback: find the most recent active call (insecure mode)
+            // Token lookup can fail due to timing issues with some tunnel providers
             const activeCallIds = Array.from(this.activeCalls.keys());
             if (activeCallIds.length > 0) {
               callId = activeCallIds[activeCallIds.length - 1];
-              console.error(`[WebSocket] Token not found, using fallback call ID: ${callId} (ngrok compatibility mode)`);
+              console.error(`[WebSocket] Token not found, using fallback call ID: ${callId} (INSECURE MODE)`);
             } else {
               // No active calls yet - create a placeholder and accept anyway
-              // The connection handler will associate it with the correct call
               callId = `pending-${Date.now()}`;
-              console.error(`[WebSocket] No active calls, using placeholder: ${callId} (ngrok compatibility mode)`);
+              console.error(`[WebSocket] No active calls, using placeholder: ${callId} (INSECURE MODE)`);
             }
           } else {
             console.error('[Security] Rejecting WebSocket: missing or invalid token');
+            console.error('[Security] Set CALLME_ALLOW_UNSIGNED_WEBHOOKS=true to disable this check (insecure)');
             socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
             socket.destroy();
             return;
@@ -167,7 +231,7 @@ export class CallManager {
         // Parse JSON messages from Twilio to capture streamSid and handle events
         if (msgBuffer.length > 0 && msgBuffer[0] === 0x7b) {
           try {
-            const msg = JSON.parse(msgBuffer.toString());
+            const msg = JSON.parse(msgBuffer.toString()) as TwilioMediaMessage;
             const msgState = this.activeCalls.get(callId);
 
             // Capture streamSid from "start" event (required for sending audio back)
@@ -181,7 +245,10 @@ export class CallManager {
               console.error(`[${callId}] Stream stopped`);
               msgState.hungUp = true;
             }
-          } catch { }
+          } catch (error) {
+            // Log parse errors but continue - malformed messages shouldn't crash the server
+            console.error(`[${callId}] Failed to parse WebSocket message:`, error);
+          }
         }
 
         // Forward audio to realtime transcription session
@@ -217,14 +284,17 @@ export class CallManager {
 
     // JSON format - only extract inbound track (user's voice)
     try {
-      const msg = JSON.parse(msgBuffer.toString());
+      const msg = JSON.parse(msgBuffer.toString()) as TwilioMediaMessage;
       if (msg.event === 'media' && msg.media?.payload) {
         const track = msg.media?.track;
         if (track === 'inbound' || track === 'inbound_track') {
           return Buffer.from(msg.media.payload, 'base64');
         }
       }
-    } catch { }
+    } catch (error) {
+      // Log but don't crash - malformed audio messages are recoverable
+      console.error('[Audio] Failed to parse media message:', error);
+    }
 
     return null;
   }
@@ -250,11 +320,14 @@ export class CallManager {
               res.end('Invalid signature');
               return;
             }
-          } else {
-            console.error('[Security] Warning: CALLME_TELNYX_PUBLIC_KEY not set, skipping signature verification');
+          } else if (!this.config.allowUnsignedWebhooks) {
+            // Warn strongly but don't block - Telnyx webhooks work without signature
+            console.error('[Security] WARNING: CALLME_TELNYX_PUBLIC_KEY not set!');
+            console.error('[Security] Webhook signature verification is DISABLED for Telnyx.');
+            console.error('[Security] Get your public key from: Mission Control > Account Settings > Keys & Credentials');
           }
 
-          const event = JSON.parse(body);
+          const event = JSON.parse(body) as TelnyxWebhookEvent;
           await this.handleTelnyxWebhook(event, res);
         } catch (error) {
           console.error('Error parsing webhook:', error);
@@ -276,18 +349,16 @@ export class CallManager {
           // Validate Twilio signature
           const authToken = this.config.providerConfig.phoneAuthToken;
           const signature = req.headers['x-twilio-signature'] as string | undefined;
-          // Use the known public URL directly - reconstructing from headers fails with ngrok
-          // because ngrok doesn't preserve headers exactly as Twilio sends them
+          // Use the known public URL directly - reconstructing from headers fails with some tunnels
           const webhookUrl = `${this.config.publicUrl}/twiml`;
 
           if (!validateTwilioSignature(authToken, signature, webhookUrl, params)) {
-            const isNgrokFreeTier = new URL(this.config.publicUrl).hostname.endsWith('.ngrok-free.dev');
-            if (isNgrokFreeTier) {
-              // Only log if ngrok free tier is used
-              // Log for debugging but proceed anyway - ngrok free tier causes signature mismatches
-              console.error('[Security] Twilio signature validation failed (proceeding anyway for ngrok compatibility)');
+            if (this.config.allowUnsignedWebhooks) {
+              // Explicit opt-in to insecure mode
+              console.error('[Security] Twilio signature validation failed (INSECURE MODE - proceeding anyway)');
             } else {
               console.error('[Security] Rejecting Twilio webhook: invalid signature');
+              console.error('[Security] Set CALLME_ALLOW_UNSIGNED_WEBHOOKS=true to disable this check (insecure)');
               res.writeHead(401);
               res.end('Invalid signature');
               return;
@@ -355,7 +426,7 @@ export class CallManager {
     res.end(xml);
   }
 
-  private async handleTelnyxWebhook(event: any, res: ServerResponse): Promise<void> {
+  private async handleTelnyxWebhook(event: TelnyxWebhookEvent, res: ServerResponse): Promise<void> {
     const eventType = event.data?.event_type;
     const callControlId = event.data?.payload?.call_control_id;
 
@@ -445,6 +516,7 @@ export class CallManager {
       startTime: Date.now(),
       hungUp: false,
       sttSession,
+      hangupCheckInterval: null,
     };
 
     this.activeCalls.set(callId, state);
@@ -466,7 +538,7 @@ export class CallManager {
       // This reduces latency by generating audio while Twilio establishes the stream
       const ttsPromise = this.generateTTSAudio(message);
 
-      await this.waitForConnection(callId, 15000);
+      await this.waitForConnection(callId, TIMEOUT_CONSTANTS.WS_CONNECTION_TIMEOUT_MS);
 
       // Send the pre-generated audio and listen for response
       const audioData = await ttsPromise;
@@ -477,10 +549,32 @@ export class CallManager {
 
       return { callId, response };
     } catch (error) {
-      state.sttSession?.close();
-      this.activeCalls.delete(callId);
+      // Clean up all state on error
+      this.cleanupCallState(state);
       throw error;
     }
+  }
+
+  /**
+   * Clean up all state associated with a call
+   */
+  private cleanupCallState(state: CallState): void {
+    // Clear any active intervals
+    if (state.hangupCheckInterval) {
+      clearInterval(state.hangupCheckInterval);
+      state.hangupCheckInterval = null;
+    }
+
+    // Close sessions
+    state.sttSession?.close();
+    state.ws?.close();
+
+    // Clean up mappings
+    this.wsTokenToCallId.delete(state.wsToken);
+    if (state.callControlId) {
+      this.callControlIdToCallId.delete(state.callControlId);
+    }
+    this.activeCalls.delete(state.callId);
   }
 
   async continueCall(callId: string, message: string): Promise<string> {
@@ -509,31 +603,23 @@ export class CallManager {
     await this.speak(state, message);
 
     // Wait for audio to finish playing before hanging up (prevent cutoff)
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await new Promise((resolve) => setTimeout(resolve, TIMEOUT_CONSTANTS.HANGUP_AUDIO_DELAY_MS));
 
     // Hang up the call via phone provider
     if (state.callControlId) {
       await this.config.providers.phone.hangup(state.callControlId);
     }
 
-    // Close sessions and clean up mappings
-    state.sttSession?.close();
-    state.ws?.close();
     state.hungUp = true;
-
-    // Clean up security token mapping
-    this.wsTokenToCallId.delete(state.wsToken);
-    if (state.callControlId) {
-      this.callControlIdToCallId.delete(state.callControlId);
-    }
-
     const durationSeconds = Math.round((Date.now() - state.startTime) / 1000);
-    this.activeCalls.delete(callId);
+
+    // Clean up all state
+    this.cleanupCallState(state);
 
     return { durationSeconds };
   }
 
-  private async waitForConnection(callId: string, timeout: number): Promise<void> {
+  private async waitForConnection(callId: string, timeout: number = TIMEOUT_CONSTANTS.WS_CONNECTION_TIMEOUT_MS): Promise<void> {
     const startTime = Date.now();
     while (Date.now() - startTime < timeout) {
       const state = this.activeCalls.get(callId);
@@ -545,7 +631,7 @@ export class CallManager {
       if (wsReady && streamReady) {
         return;
       }
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, TIMEOUT_CONSTANTS.HANGUP_CHECK_INTERVAL_MS));
     }
     throw new Error('WebSocket connection timeout');
   }
@@ -558,8 +644,8 @@ export class CallManager {
     console.error(`[TTS] Generating audio for: ${text.substring(0, 50)}...`);
     const tts = this.config.providers.tts;
     const pcmData = await tts.synthesize(text);
-    const resampledPcm = this.resample24kTo8k(pcmData);
-    const muLawData = this.pcmToMuLaw(resampledPcm);
+    const resampledPcm = resample24kTo8k(pcmData);
+    const muLawData = pcmToMuLaw(resampledPcm);
     console.error(`[TTS] Audio generated: ${muLawData.length} bytes`);
     return muLawData;
   }
@@ -581,13 +667,12 @@ export class CallManager {
 
   private async sendPreGeneratedAudio(state: CallState, muLawData: Buffer): Promise<void> {
     console.error(`[${state.callId}] Sending pre-generated audio...`);
-    const chunkSize = 160;  // 20ms at 8kHz
-    for (let i = 0; i < muLawData.length; i += chunkSize) {
-      this.sendMediaChunk(state, muLawData.subarray(i, i + chunkSize));
-      await new Promise((resolve) => setTimeout(resolve, 20));
+    for (let i = 0; i < muLawData.length; i += AUDIO_CONSTANTS.CHUNK_SIZE_BYTES) {
+      this.sendMediaChunk(state, muLawData.subarray(i, i + AUDIO_CONSTANTS.CHUNK_SIZE_BYTES));
+      await new Promise((resolve) => setTimeout(resolve, AUDIO_CONSTANTS.CHUNK_SEND_DELAY_MS));
     }
     // Small delay to ensure audio finishes playing before listening
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, AUDIO_CONSTANTS.POST_AUDIO_DELAY_MS));
     console.error(`[${state.callId}] Audio sent`);
   }
 
@@ -609,7 +694,7 @@ export class CallManager {
       await this.sendAudio(state, pcmData);
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    await new Promise((resolve) => setTimeout(resolve, TIMEOUT_CONSTANTS.POST_SPEAK_DELAY_MS));
     console.error(`[${state.callId}] Speaking done`);
   }
 
@@ -620,40 +705,37 @@ export class CallManager {
   ): Promise<void> {
     let pendingPcm = Buffer.alloc(0);
     let pendingMuLaw = Buffer.alloc(0);
-    const OUTPUT_CHUNK_SIZE = 160; // 20ms at 8kHz
-    const SAMPLES_PER_RESAMPLE = 6; // 6 bytes (3 samples) at 24kHz -> 1 sample at 8kHz
 
     // Jitter buffer: accumulate audio before starting playback to smooth out
     // timing variations from network latency and burst delivery patterns
-    const JITTER_BUFFER_MS = 100; // Buffer 100ms of audio before starting
     // 8000 samples/sec ÷ 1000 ms/sec = 8 samples per ms; mu-law is 1 byte per sample
-    const JITTER_BUFFER_SIZE = (8000 / 1000) * JITTER_BUFFER_MS; // 800 bytes at 8kHz mu-law
+    const jitterBufferSize = (8000 / 1000) * AUDIO_CONSTANTS.JITTER_BUFFER_MS;
     let playbackStarted = false;
 
     // Helper to drain and send buffered mu-law audio in chunks
     const drainBuffer = async () => {
-      while (pendingMuLaw.length >= OUTPUT_CHUNK_SIZE) {
-        this.sendMediaChunk(state, pendingMuLaw.subarray(0, OUTPUT_CHUNK_SIZE));
-        pendingMuLaw = pendingMuLaw.subarray(OUTPUT_CHUNK_SIZE);
-        await new Promise((resolve) => setTimeout(resolve, 20));
+      while (pendingMuLaw.length >= AUDIO_CONSTANTS.CHUNK_SIZE_BYTES) {
+        this.sendMediaChunk(state, pendingMuLaw.subarray(0, AUDIO_CONSTANTS.CHUNK_SIZE_BYTES));
+        pendingMuLaw = pendingMuLaw.subarray(AUDIO_CONSTANTS.CHUNK_SIZE_BYTES);
+        await new Promise((resolve) => setTimeout(resolve, AUDIO_CONSTANTS.CHUNK_SEND_DELAY_MS));
       }
     };
 
     for await (const chunk of synthesizeStream(text)) {
       pendingPcm = Buffer.concat([pendingPcm, chunk]);
 
-      const completeUnits = Math.floor(pendingPcm.length / SAMPLES_PER_RESAMPLE);
+      const completeUnits = Math.floor(pendingPcm.length / AUDIO_CONSTANTS.SAMPLES_PER_RESAMPLE);
       if (completeUnits > 0) {
-        const bytesToProcess = completeUnits * SAMPLES_PER_RESAMPLE;
+        const bytesToProcess = completeUnits * AUDIO_CONSTANTS.SAMPLES_PER_RESAMPLE;
         const toProcess = pendingPcm.subarray(0, bytesToProcess);
         pendingPcm = pendingPcm.subarray(bytesToProcess);
 
-        const resampled = this.resample24kTo8k(toProcess);
-        const muLaw = this.pcmToMuLaw(resampled);
+        const resampled = resample24kTo8k(toProcess);
+        const muLaw = pcmToMuLaw(resampled);
         pendingMuLaw = Buffer.concat([pendingMuLaw, muLaw]);
 
         // Wait for jitter buffer to fill before starting playback
-        if (!playbackStarted && pendingMuLaw.length < JITTER_BUFFER_SIZE) {
+        if (!playbackStarted && pendingMuLaw.length < jitterBufferSize) {
           continue;
         }
         playbackStarted = true;
@@ -672,13 +754,12 @@ export class CallManager {
   }
 
   private async sendAudio(state: CallState, pcmData: Buffer): Promise<void> {
-    const resampledPcm = this.resample24kTo8k(pcmData);
-    const muLawData = this.pcmToMuLaw(resampledPcm);
+    const resampledPcm = resample24kTo8k(pcmData);
+    const muLawData = pcmToMuLaw(resampledPcm);
 
-    const chunkSize = 160;
-    for (let i = 0; i < muLawData.length; i += chunkSize) {
-      this.sendMediaChunk(state, muLawData.subarray(i, i + chunkSize));
-      await new Promise((resolve) => setTimeout(resolve, 20));
+    for (let i = 0; i < muLawData.length; i += AUDIO_CONSTANTS.CHUNK_SIZE_BYTES) {
+      this.sendMediaChunk(state, muLawData.subarray(i, i + AUDIO_CONSTANTS.CHUNK_SIZE_BYTES));
+      await new Promise((resolve) => setTimeout(resolve, AUDIO_CONSTANTS.CHUNK_SEND_DELAY_MS));
     }
   }
 
@@ -689,82 +770,53 @@ export class CallManager {
       throw new Error('STT session not available');
     }
 
-    // Race between getting a transcript and detecting hangup
-    const transcript = await Promise.race([
-      state.sttSession.waitForTranscript(this.config.transcriptTimeoutMs),
-      this.waitForHangup(state),
-    ]);
+    // Start hangup monitoring
+    const hangupPromise = this.waitForHangup(state);
 
-    if (state.hungUp) {
-      throw new Error('Call was hung up by user');
+    try {
+      // Race between getting a transcript and detecting hangup
+      const transcript = await Promise.race([
+        state.sttSession.waitForTranscript(this.config.transcriptTimeoutMs),
+        hangupPromise,
+      ]);
+
+      if (state.hungUp) {
+        throw new Error('Call was hung up by user');
+      }
+
+      console.error(`[${state.callId}] User said: ${transcript}`);
+      return transcript;
+    } finally {
+      // Always clean up the hangup check interval
+      if (state.hangupCheckInterval) {
+        clearInterval(state.hangupCheckInterval);
+        state.hangupCheckInterval = null;
+      }
     }
-
-    console.error(`[${state.callId}] User said: ${transcript}`);
-    return transcript;
   }
 
   /**
    * Returns a promise that rejects when the call is hung up.
    * Used to race against transcript waiting.
+   * The interval is stored in state.hangupCheckInterval for cleanup.
    */
   private waitForHangup(state: CallState): Promise<never> {
     return new Promise((_, reject) => {
-      const checkInterval = setInterval(() => {
+      // Clear any existing interval first
+      if (state.hangupCheckInterval) {
+        clearInterval(state.hangupCheckInterval);
+      }
+
+      state.hangupCheckInterval = setInterval(() => {
         if (state.hungUp) {
-          clearInterval(checkInterval);
+          if (state.hangupCheckInterval) {
+            clearInterval(state.hangupCheckInterval);
+            state.hangupCheckInterval = null;
+          }
           reject(new Error('Call was hung up by user'));
         }
-      }, 100);  // Check every 100ms
-
-      // Clean up interval after transcript timeout to avoid memory leaks
-      setTimeout(() => {
-        clearInterval(checkInterval);
-      }, this.config.transcriptTimeoutMs + 1000);
+      }, TIMEOUT_CONSTANTS.HANGUP_CHECK_INTERVAL_MS);
     });
-  }
-
-  private resample24kTo8k(pcmData: Buffer): Buffer {
-    const inputSamples = pcmData.length / 2;
-    const outputSamples = Math.floor(inputSamples / 3);
-    const output = Buffer.alloc(outputSamples * 2);
-
-    for (let i = 0; i < outputSamples; i++) {
-      // Use linear interpolation instead of point-sampling to reduce artifacts
-      // For each output sample, average the 3 surrounding input samples
-      // This acts as a simple anti-aliasing low-pass filter
-      const baseIdx = i * 3;
-      const s0 = pcmData.readInt16LE(baseIdx * 2);
-      const s1 = baseIdx + 1 < inputSamples ? pcmData.readInt16LE((baseIdx + 1) * 2) : s0;
-      const s2 = baseIdx + 2 < inputSamples ? pcmData.readInt16LE((baseIdx + 2) * 2) : s1;
-      const interpolated = Math.round((s0 + s1 + s2) / 3);
-      output.writeInt16LE(interpolated, i * 2);
-    }
-
-    return output;
-  }
-
-  private pcmToMuLaw(pcmData: Buffer): Buffer {
-    const muLawData = Buffer.alloc(Math.floor(pcmData.length / 2));
-    for (let i = 0; i < muLawData.length; i++) {
-      const pcm = pcmData.readInt16LE(i * 2);
-      muLawData[i] = this.pcmToMuLawSample(pcm);
-    }
-    return muLawData;
-  }
-
-  private pcmToMuLawSample(pcm: number): number {
-    const BIAS = 0x84;
-    const CLIP = 32635;
-    let sign = (pcm >> 8) & 0x80;
-    if (sign) pcm = -pcm;
-    if (pcm > CLIP) pcm = CLIP;
-    pcm += BIAS;
-    let exponent = 7;
-    for (let expMask = 0x4000; (pcm & expMask) === 0 && exponent > 0; exponent--) {
-      expMask >>= 1;
-    }
-    const mantissa = (pcm >> (exponent + 3)) & 0x0f;
-    return (~(sign | (exponent << 4) | mantissa)) & 0xff;
   }
 
   getHttpServer() {
