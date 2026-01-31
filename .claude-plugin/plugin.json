@@ -15,16 +15,20 @@
       "command": "bun",
       "args": ["run", "--cwd", "${CLAUDE_PLUGIN_ROOT}/server", "start"],
       "env": {
+        "CALLME_PHONE_PROVIDER": "${CALLME_PHONE_PROVIDER:-telnyx}",
         "CALLME_PHONE_ACCOUNT_SID": "${CALLME_PHONE_ACCOUNT_SID}",
         "CALLME_PHONE_AUTH_TOKEN": "${CALLME_PHONE_AUTH_TOKEN}",
         "CALLME_PHONE_NUMBER": "${CALLME_PHONE_NUMBER}",
         "CALLME_USER_PHONE_NUMBER": "${CALLME_USER_PHONE_NUMBER}",
         "CALLME_OPENAI_API_KEY": "${CALLME_OPENAI_API_KEY}",
+        "CALLME_TTS_MODEL": "${CALLME_TTS_MODEL:-gpt-4o-mini-tts}",
         "CALLME_TTS_VOICE": "${CALLME_TTS_VOICE:-onyx}",
         "CALLME_NGROK_AUTHTOKEN": "${CALLME_NGROK_AUTHTOKEN}",
+        "CALLME_NGROK_DOMAIN": "${CALLME_NGROK_DOMAIN}",
         "CALLME_PORT": "${CALLME_PORT:-3333}",
         "CALLME_TRANSCRIPT_TIMEOUT_MS": "${CALLME_TRANSCRIPT_TIMEOUT_MS:-180000}",
-        "CALLME_STT_SILENCE_DURATION_MS": "${CALLME_STT_SILENCE_DURATION_MS:-800}"
+        "CALLME_STT_SILENCE_DURATION_MS": "${CALLME_STT_SILENCE_DURATION_MS:-800}",
+        "CALLME_INBOUND_GREETING": "${CALLME_INBOUND_GREETING:-Hello, this is Claude. How can I help you?}"
       }
     }
   },
@@ -33,8 +37,18 @@
       {
         "hooks": [
           {
-            "type": "prompt",
-            "prompt": "SILENTLY evaluate if you should call the user. ONLY use initiate_call if you completed significant work and need to discuss next steps, or are genuinely blocked. Do NOT output any text - either call or do nothing."
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/inbound-call-hook.sh"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/check-pending-call.sh"
           }
         ]
       }

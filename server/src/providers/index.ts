@@ -33,6 +33,7 @@ export interface ProviderConfig {
   // OpenAI (TTS + STT)
   openaiApiKey: string;
   ttsVoice?: string;
+  ttsModel?: string;
   sttModel?: string;
   sttSilenceDurationMs?: number;
 }
@@ -53,6 +54,7 @@ export function loadProviderConfig(): ProviderConfig {
     telnyxPublicKey: process.env.CALLME_TELNYX_PUBLIC_KEY,
     openaiApiKey: process.env.CALLME_OPENAI_API_KEY || '',
     ttsVoice: process.env.CALLME_TTS_VOICE || 'onyx',
+    ttsModel: process.env.CALLME_TTS_MODEL || 'tts-1',
     sttModel: process.env.CALLME_STT_MODEL || 'gpt-4o-transcribe',
     sttSilenceDurationMs,
   };
@@ -81,6 +83,7 @@ export function createTTSProvider(config: ProviderConfig): TTSProvider {
   provider.initialize({
     apiKey: config.openaiApiKey,
     voice: config.ttsVoice,
+    model: config.ttsModel,
   });
   return provider;
 }
