@@ -1,5 +1,13 @@
 import WebSocket, { WebSocketServer } from 'ws';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
+import { appendFileSync } from 'fs';
+
+// Debug logging to file
+const DEBUG_LOG = '/tmp/callme-debug.log';
+function debugLog(msg: string) {
+  const ts = new Date().toISOString();
+  appendFileSync(DEBUG_LOG, `[${ts}] ${msg}\n`);
+}
 import {
   loadProviderConfig,
   createProviders,
@@ -27,6 +35,7 @@ interface CallState {
   startTime: number;
   hungUp: boolean;
   sttSession: RealtimeSTTSession | null;
+  isInbound?: boolean;  // True for incoming calls
 }
 
 export interface ServerConfig {
@@ -37,6 +46,7 @@ export interface ServerConfig {
   providers: ProviderRegistry;
   providerConfig: ProviderConfig;  // For webhook signature verification
   transcriptTimeoutMs: number;
+  inboundGreeting: string;  // Greeting for incoming calls
 }
 
 export function loadServerConfig(publicUrl: string): ServerConfig {
@@ -56,6 +66,10 @@ export function loadServerConfig(publicUrl: string): ServerConfig {
   // Default 3 minutes for transcript timeout
   const transcriptTimeoutMs = parseInt(process.env.CALLME_TRANSCRIPT_TIMEOUT_MS || '180000', 10);
 
+  // Default greeting for inbound calls
+  const inboundGreeting = process.env.CALLME_INBOUND_GREETING ||
+    "Hello, this is Claude. How can I help you?";
+
   return {
     publicUrl,
     port: parseInt(process.env.CALLME_PORT || '3333', 10),
@@ -64,6 +78,7 @@ export function loadServerConfig(publicUrl: string): ServerConfig {
     providers,
     providerConfig,
     transcriptTimeoutMs,
+    inboundGreeting,
   };
 }
 
@@ -75,9 +90,24 @@ export class CallManager {
   private wss: WebSocketServer | null = null;
   private config: ServerConfig;
   private currentCallId = 0;
+  private onInboundCall?: (callId: string, from: string, transcript: string) => void;
 
   constructor(config: ServerConfig) {
     this.config = config;
+  }
+
+  /**
+   * Set handler for inbound call notifications
+   * Called when an incoming call is answered, greeted, and user speaks
+   */
+  setInboundCallHandler(handler: (callId: string, from: string, transcript: string) => void): void {
+    this.onInboundCall = handler;
+  }
+
+  private emitInboundCallNotification(callId: string, from: string, transcript: string): void {
+    if (this.onInboundCall) {
+      this.onInboundCall(callId, from, transcript);
+    }
   }
 
   startServer(): void {
@@ -359,6 +389,8 @@ export class CallManager {
     const eventType = event.data?.event_type;
     const callControlId = event.data?.payload?.call_control_id;
 
+    debugLog(`Telnyx webhook: ${eventType}, callControlId: ${callControlId}`);
+    console.error(`[DEBUG] Telnyx webhook received: ${eventType}, callControlId: ${callControlId}`);
     console.error(`Phone webhook: ${eventType}`);
 
     // Always respond 200 OK immediately
@@ -370,6 +402,14 @@ export class CallManager {
     try {
       switch (eventType) {
         case 'call.initiated':
+          // Check if this is an inbound call
+          const direction = event.data?.payload?.direction;
+          console.error(`[Webhook] call.initiated - direction: ${direction}`);
+          if (direction === 'incoming') {
+            this.handleInboundCall(event.data.payload).catch(err => {
+              console.error('[Inbound] Failed to handle inbound call:', err);
+            });
+          }
           break;
 
         case 'call.answered':
@@ -420,6 +460,172 @@ export class CallManager {
     } catch (error) {
       console.error(`Error handling webhook ${eventType}:`, error);
     }
+  }
+
+  /**
+   * Handle an incoming call - answer, greet, listen, then notify Claude
+   */
+  private async handleInboundCall(payload: any): Promise<void> {
+    const callControlId = payload.call_control_id;
+    const from = payload.from;  // Caller's phone number
+
+    debugLog(`handleInboundCall started: from=${from}, callControlId=${callControlId}`);
+    console.error(`[Inbound] Incoming call from ${from}, callControlId: ${callControlId}`);
+
+    // Create call state for the inbound call
+    const callId = `inbound-${++this.currentCallId}-${Date.now()}`;
+
+    // Create realtime transcription session
+    console.error(`[${callId}] Creating STT session...`);
+    const sttSession = this.config.providers.stt.createSession();
+    await sttSession.connect();
+    console.error(`[${callId}] STT session connected`);
+
+    // Generate secure token for WebSocket authentication
+    const wsToken = generateWebSocketToken();
+
+    const state: CallState = {
+      callId,
+      callControlId,
+      userPhoneNumber: from,
+      ws: null,
+      streamSid: null,
+      streamingReady: false,
+      wsToken,
+      conversationHistory: [],
+      startTime: Date.now(),
+      hungUp: false,
+      sttSession,
+      isInbound: true,
+    };
+
+    this.activeCalls.set(callId, state);
+    this.callControlIdToCallId.set(callControlId, callId);
+    this.wsTokenToCallId.set(wsToken, callId);
+
+    try {
+      // Answer the call immediately
+      console.error(`[${callId}] Answering inbound call via Telnyx API...`);
+      await this.config.providers.phone.answerCall(callControlId);
+      console.error(`[${callId}] Answer API call succeeded`);
+
+      // Wait for WebSocket connection and streaming to be ready
+      console.error(`[${callId}] Waiting for WebSocket connection...`);
+      await this.waitForConnection(callId, 15000);
+      console.error(`[${callId}] WebSocket connection ready`);
+
+      // Check if user hung up while we were connecting
+      if (state.hungUp) {
+        console.error(`[${callId}] User hung up during connection`);
+        this.cleanupCall(callId);
+        return;
+      }
+
+      // Play greeting
+      const greeting = this.config.inboundGreeting;
+      console.error(`[${callId}] Generating TTS for greeting: ${greeting}`);
+      const audioData = await this.generateTTSAudio(greeting);
+      console.error(`[${callId}] Sending greeting audio...`);
+      await this.sendPreGeneratedAudio(state, audioData);
+      console.error(`[${callId}] Greeting audio sent`);
+
+      // Check again if user hung up during greeting
+      if (state.hungUp) {
+        console.error(`[${callId}] User hung up during greeting`);
+        this.cleanupCall(callId);
+        return;
+      }
+
+      // Listen for user's response (with 30 second timeout for inbound)
+      console.error(`[${callId}] Listening for user response...`);
+      const transcript = await this.listenWithTimeout(state, 30000);
+
+      state.conversationHistory.push({ speaker: 'claude', message: greeting });
+      state.conversationHistory.push({ speaker: 'user', message: transcript });
+
+      console.error(`[${callId}] User said: ${transcript}`);
+
+      // Write pending call info to file for Stop hook to detect
+      const pendingCallInfo = {
+        callId,
+        from,
+        transcript,
+        timestamp: Date.now()
+      };
+      const fs = await import('fs');
+      fs.writeFileSync('/tmp/callme-pending-inbound.json', JSON.stringify(pendingCallInfo));
+      debugLog(`Wrote pending call info to /tmp/callme-pending-inbound.json`);
+
+      // Notify Claude via MCP notification
+      this.emitInboundCallNotification(callId, from, transcript);
+
+      // Play hold message while waiting for Claude to respond
+      const holdMessage = "One moment please, I'm connecting you to Claude.";
+      console.error(`[${callId}] Playing hold message...`);
+      const holdAudio = await this.generateTTSAudio(holdMessage);
+      await this.sendPreGeneratedAudio(state, holdAudio);
+
+    } catch (error) {
+      debugLog(`Inbound call ERROR: ${error instanceof Error ? error.message : error}`);
+      console.error(`[${callId}] Inbound call handling error:`, error instanceof Error ? error.message : error);
+      console.error(`[${callId}] Full error:`, error);
+      // Try to hang up if something went wrong
+      try {
+        await this.hangUp(callId);
+      } catch (hangupErr) {
+        console.error(`[${callId}] Failed to hang up:`, hangupErr);
+      }
+    }
+  }
+
+  /**
+   * Listen with a specific timeout (used for inbound calls)
+   */
+  private async listenWithTimeout(state: CallState, timeoutMs: number): Promise<string> {
+    if (!state.sttSession) {
+      throw new Error('STT session not available');
+    }
+
+    const transcript = await Promise.race([
+      state.sttSession.waitForTranscript(timeoutMs),
+      this.waitForHangup(state),
+    ]);
+
+    if (state.hungUp) {
+      throw new Error('Call was hung up by user');
+    }
+
+    return transcript;
+  }
+
+  /**
+   * Clean up call state and mappings
+   */
+  private cleanupCall(callId: string): void {
+    const state = this.activeCalls.get(callId);
+    if (state) {
+      state.sttSession?.close();
+      state.ws?.close();
+      this.wsTokenToCallId.delete(state.wsToken);
+      if (state.callControlId) {
+        this.callControlIdToCallId.delete(state.callControlId);
+      }
+      this.activeCalls.delete(callId);
+    }
+  }
+
+  /**
+   * Hang up a call and clean up
+   */
+  private async hangUp(callId: string): Promise<void> {
+    const state = this.activeCalls.get(callId);
+    if (!state) return;
+
+    if (state.callControlId) {
+      await this.config.providers.phone.hangup(state.callControlId);
+    }
+    state.hungUp = true;
+    this.cleanupCall(callId);
   }
 
   async initiateCall(message: string): Promise<{ callId: string; response: string }> {

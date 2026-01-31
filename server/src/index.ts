@@ -45,8 +45,25 @@ async function main() {
   // Create stdio MCP server
   const mcpServer = new Server(
     { name: 'callme', version: '3.0.0' },
-    { capabilities: { tools: {} } }
+    { capabilities: { tools: {}, logging: {} } }
   );
+
+  // Wire up inbound call notifications to MCP
+  callManager.setInboundCallHandler((callId, from, transcript) => {
+    mcpServer.notification({
+      method: 'notifications/message',
+      params: {
+        level: 'info',
+        data: {
+          type: 'inbound_call',
+          call_id: callId,
+          from: from,
+          transcript: transcript
+        },
+        message: `Incoming call from ${from}!\n\nUser said: "${transcript}"\n\nUse continue_call with call_id="${callId}" to respond, or end_call to hang up.`
+      }
+    });
+  });
 
   // List available tools
   mcpServer.setRequestHandler(ListToolsRequestSchema, async () => {
