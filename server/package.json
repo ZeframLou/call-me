@@ -1,13 +1,15 @@
 {
   "name": "callme-mcp",
   "version": "1.0.2",
-  "description": "MCP server that lets Claude call you on the phone",
+  "description": "MCP server that lets Claude call you on the phone or message you via Slack",
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
     "prestart": "bun install --silent",
     "start": "bun run src/index.ts",
-    "dev": "bun --watch src/index.ts"
+    "start:slack": "bun run src/index-slack.ts",
+    "dev": "bun --watch src/index.ts",
+    "dev:slack": "bun --watch src/index-slack.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
@@ -18,6 +20,7 @@
   "devDependencies": {
     "@types/node": "^22.10.5",
     "@types/ws": "^8.5.13",
-    "bun-types": "latest"
+    "bun-types": "latest",
+    "typescript": "^5.9.3"
   }
 }
