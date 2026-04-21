@@ -124,9 +124,13 @@ export class CallManager {
           }
           console.error(`[Security] WebSocket token validated for call ${callId}`);
         } else if (!callId) {
-          // Token missing or not found - only allow fallback for ngrok free tier
-          const isNgrokFreeTier = new URL(this.config.publicUrl).hostname.endsWith('.ngrok-free.dev');
-          if (isNgrokFreeTier) {
+          // Token missing or not found - allow fallback for ngrok-free and
+          // Tailscale Funnel (both are reverse proxies that may not preserve
+          // query-string tokens reliably).
+          const hostname = new URL(this.config.publicUrl).hostname;
+          const isNgrokFreeTier = hostname.endsWith('.ngrok-free.dev');
+          const isTailscaleFunnel = hostname.endsWith('.ts.net');
+          if (isNgrokFreeTier || isTailscaleFunnel) {
             // Fallback: find the most recent active call (ngrok compatibility mode)
             // Token lookup can fail due to timing issues with ngrok's free tier
             const activeCallIds = Array.from(this.activeCalls.keys());
@@ -294,11 +298,17 @@ export class CallManager {
           const webhookUrl = `${this.config.publicUrl}/twiml`;
 
           if (!validateTwilioSignature(authToken, signature, webhookUrl, params)) {
-            const isNgrokFreeTier = new URL(this.config.publicUrl).hostname.endsWith('.ngrok-free.dev');
-            if (isNgrokFreeTier) {
-              // Only log if ngrok free tier is used
-              // Log for debugging but proceed anyway - ngrok free tier causes signature mismatches
-              console.error('[Security] Twilio signature validation failed (proceeding anyway for ngrok compatibility)');
+            const hostname = new URL(this.config.publicUrl).hostname;
+            const isNgrokFreeTier = hostname.endsWith('.ngrok-free.dev');
+            const isTailscaleFunnel = hostname.endsWith('.ts.net');
+            const skipForDev = process.env.CALLME_SKIP_SIGNATURE_CHECK === '1';
+            if (isNgrokFreeTier || isTailscaleFunnel || skipForDev) {
+              // Log for debugging but proceed anyway. Known to fail with
+              // ngrok free tier and Tailscale Funnel (reverse proxies that
+              // don't preserve the signature-input URL verbatim).
+              console.error('[Security] Twilio signature validation failed (proceeding for '
+                + (isNgrokFreeTier ? 'ngrok-free' : isTailscaleFunnel ? 'tailscale-funnel' : 'dev')
+                + ' compatibility)');
             } else {
               console.error('[Security] Rejecting Twilio webhook: invalid signature');
               res.writeHead(401);
