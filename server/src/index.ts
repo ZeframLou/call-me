@@ -50,20 +50,33 @@ async function main() {
     process.exit(1);
   }
 
-  // Start ngrok tunnel pointing at the actual bound port
-  console.error('Starting ngrok tunnel...');
+  // Publicly-reachable URL where phone providers will POST webhooks.
+  // Two modes:
+  //   1. CALLME_PUBLIC_URL=https://<host> is set — skip ngrok entirely and use
+  //      the provided URL. For self-hosted deployments (VPS, EC2, Tailscale
+  //      Funnel, Cloudflare Tunnel, etc.) where inbound HTTPS is already solved.
+  //   2. Otherwise — start ngrok to expose the ephemeral HTTP port.
   let publicUrl: string;
-  try {
-    publicUrl = await startNgrok(actualPort, (newUrl) => {
-      console.error(`[ngrok] Updating public URL to: ${newUrl}`);
-      callManager.setPublicUrl(newUrl);
-    });
+  const customPublicUrl = process.env.CALLME_PUBLIC_URL?.trim();
+  if (customPublicUrl) {
+    publicUrl = customPublicUrl.replace(/\/+$/, ''); // strip trailing slash
     callManager.setPublicUrl(publicUrl);
-    console.error(`ngrok tunnel: ${publicUrl}`);
-  } catch (error) {
-    console.error('Failed to start ngrok:', error instanceof Error ? error.message : error);
-    await callManager.shutdown();
-    process.exit(1);
+    console.error(`Using CALLME_PUBLIC_URL: ${publicUrl}`);
+    console.error(`(note: inbound traffic must reach port ${actualPort} on this host)`);
+  } else {
+    console.error('Starting ngrok tunnel...');
+    try {
+      publicUrl = await startNgrok(actualPort, (newUrl) => {
+        console.error(`[ngrok] Updating public URL to: ${newUrl}`);
+        callManager.setPublicUrl(newUrl);
+      });
+      callManager.setPublicUrl(publicUrl);
+      console.error(`ngrok tunnel: ${publicUrl}`);
+    } catch (error) {
+      console.error('Failed to start ngrok:', error instanceof Error ? error.message : error);
+      await callManager.shutdown();
+      process.exit(1);
+    }
   }
 
   // Create stdio MCP server
