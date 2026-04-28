@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/zeframlou-call-me-badge.png)](https://mseep.ai/app/zeframlou-call-me)
+
 # CallMe
 
 **Minimal plugin that lets Claude Code call you on the phone.**
