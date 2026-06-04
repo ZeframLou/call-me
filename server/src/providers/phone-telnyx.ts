@@ -37,6 +37,10 @@ export class TelnyxPhoneProvider implements PhoneProvider {
       throw new Error('Telnyx not initialized');
     }
 
+    console.error(`[Telnyx] Initiating call: ${from} -> ${to}`);
+    console.error(`[Telnyx] Webhook URL: ${webhookUrl}`);
+    console.error(`[Telnyx] Connection ID: ${this.connectionId}`);
+
     const response = await fetch('https://api.telnyx.com/v2/calls', {
       method: 'POST',
       headers: {
@@ -55,11 +59,31 @@ export class TelnyxPhoneProvider implements PhoneProvider {
     });
 
     if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`Telnyx call failed: ${response.status} ${error}`);
+      const errorText = await response.text();
+      let errorDetail = errorText;
+
+      // Try to parse as JSON for better error messages
+      try {
+        const errorJson = JSON.parse(errorText);
+        if (errorJson.errors && Array.isArray(errorJson.errors)) {
+          errorDetail = errorJson.errors
+            .map((e: { title?: string; detail?: string; code?: string }) =>
+              `${e.title || 'Error'}: ${e.detail || e.code || 'Unknown'}`
+            )
+            .join('; ');
+        } else if (errorJson.error) {
+          errorDetail = errorJson.error;
+        }
+      } catch {
+        // Keep original error text if not JSON
+      }
+
+      console.error(`[Telnyx] Call initiation failed: ${response.status} - ${errorDetail}`);
+      throw new Error(`Telnyx call failed (${response.status}): ${errorDetail}`);
     }
 
     const data = await response.json() as TelnyxCallResponse;
+    console.error(`[Telnyx] Call created successfully. Control ID: ${data.data.call_control_id}`);
     return data.data.call_control_id;
   }
 

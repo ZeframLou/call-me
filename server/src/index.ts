@@ -10,8 +10,56 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { CallManager, loadServerConfig } from './phone-call.js';
+import { CallManager, loadServerConfig, type DiagnosticsInfo } from './phone-call.js';
 import { startNgrok, stopNgrok } from './ngrok.js';
+
+/**
+ * Format diagnostics into human-readable output for Claude
+ */
+function formatDiagnostics(d: DiagnosticsInfo): string {
+  const lines: string[] = [];
+
+  lines.push('## CallMe Server Diagnostics\n');
+
+  // Server status
+  lines.push(`**Server Status:** ${d.serverStatus}`);
+  lines.push(`**Uptime:** ${d.uptime}s`);
+  lines.push(`**ngrok URL:** ${d.ngrokUrl}`);
+  lines.push(`**ngrok Status:** ${d.ngrokStatus}`);
+  lines.push(`**Active Calls:** ${d.activeCalls}\n`);
+
+  // Configuration
+  lines.push('### Configuration');
+  lines.push(`- Phone Provider: ${d.config.phoneProvider}`);
+  lines.push(`- Phone Number: ${d.config.phoneNumber}`);
+  lines.push(`- User Phone: ${d.config.userPhoneNumber}`);
+  lines.push(`- Connection Timeout: ${d.config.connectionTimeoutMs}ms`);
+  lines.push(`- Max Retries: ${d.config.maxCallRetries}\n`);
+
+  // Active calls
+  if (d.activeCallDetails.length > 0) {
+    lines.push('### Active Calls');
+    for (const call of d.activeCallDetails) {
+      lines.push(`- **${call.callId}**: ${call.state} (${call.durationSecs}s) - WS: ${call.wsConnected ? '✓' : '✗'}, Stream: ${call.streamReady ? '✓' : '✗'}`);
+    }
+    lines.push('');
+  }
+
+  // Recent events
+  if (d.recentEvents.length > 0) {
+    lines.push('### Recent Events (last 20)');
+    for (const event of d.recentEvents.slice().reverse()) {
+      const time = new Date(event.timestamp).toISOString().slice(11, 19);
+      const callInfo = event.callId ? ` [${event.callId}]` : '';
+      lines.push(`- ${time}${callInfo} **${event.type}**: ${event.message}`);
+    }
+  } else {
+    lines.push('### Recent Events');
+    lines.push('No events recorded yet.');
+  }
+
+  return lines.join('\n');
+}
 import { ensureKokoroRunning } from './providers/tts-kokoro.js';
 import { loadProviderConfig } from './providers/index.js';
 
@@ -126,6 +174,15 @@ async function main() {
             required: ['call_id', 'message'],
           },
         },
+        {
+          name: 'get_diagnostics',
+          description: 'Get diagnostic information about the callme server. Use this to troubleshoot issues, check server health, view recent events, and inspect active calls. Returns server status, ngrok tunnel info, configuration, and recent call history.',
+          inputSchema: {
+            type: 'object',
+            properties: {},
+            required: [],
+          },
+        },
       ],
     };
   });
@@ -169,6 +226,15 @@ async function main() {
 
         return {
           content: [{ type: 'text', text: `Call ended. Duration: ${durationSeconds}s` }],
+        };
+      }
+
+      if (request.params.name === 'get_diagnostics') {
+        const diagnostics = callManager.getDiagnostics();
+        const formattedOutput = formatDiagnostics(diagnostics);
+
+        return {
+          content: [{ type: 'text', text: formattedOutput }],
         };
       }
 

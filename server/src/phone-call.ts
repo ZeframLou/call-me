@@ -37,6 +37,8 @@ export interface ServerConfig {
   providers: ProviderRegistry;
   providerConfig: ProviderConfig;  // For webhook signature verification
   transcriptTimeoutMs: number;
+  connectionTimeoutMs: number;  // Timeout waiting for phone answer + WebSocket
+  maxCallRetries: number;       // Number of retry attempts for failed calls
 }
 
 export function loadServerConfig(publicUrl: string): ServerConfig {
@@ -56,6 +58,12 @@ export function loadServerConfig(publicUrl: string): ServerConfig {
   // Default 3 minutes for transcript timeout
   const transcriptTimeoutMs = parseInt(process.env.CALLME_TRANSCRIPT_TIMEOUT_MS || '180000', 10);
 
+  // Default 30 seconds for connection timeout (was 15s, increased for reliability)
+  const connectionTimeoutMs = parseInt(process.env.CALLME_CONNECTION_TIMEOUT_MS || '30000', 10);
+
+  // Default 2 retries for failed calls (3 total attempts)
+  const maxCallRetries = parseInt(process.env.CALLME_MAX_RETRIES || '2', 10);
+
   return {
     publicUrl,
     port: parseInt(process.env.CALLME_PORT || '0', 10),
@@ -64,7 +72,40 @@ export function loadServerConfig(publicUrl: string): ServerConfig {
     providers,
     providerConfig,
     transcriptTimeoutMs,
+    connectionTimeoutMs,
+    maxCallRetries,
   };
+}
+
+interface DiagnosticEvent {
+  timestamp: number;
+  type: 'call_initiated' | 'call_connected' | 'call_failed' | 'call_ended' | 'webhook_received' | 'error';
+  callId?: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export interface DiagnosticsInfo {
+  serverStatus: 'running' | 'error';
+  uptime: number;
+  ngrokUrl: string;
+  ngrokStatus: 'connected' | 'unknown';
+  activeCalls: number;
+  config: {
+    connectionTimeoutMs: number;
+    maxCallRetries: number;
+    phoneProvider: string;
+    phoneNumber: string;
+    userPhoneNumber: string;
+  };
+  recentEvents: DiagnosticEvent[];
+  activeCallDetails: Array<{
+    callId: string;
+    state: string;
+    durationSecs: number;
+    wsConnected: boolean;
+    streamReady: boolean;
+  }>;
 }
 
 export class CallManager {
@@ -75,9 +116,49 @@ export class CallManager {
   private wss: WebSocketServer | null = null;
   private config: ServerConfig;
   private currentCallId = 0;
+  private startTime = Date.now();
+  private recentEvents: DiagnosticEvent[] = [];
+  private maxRecentEvents = 50;
 
   constructor(config: ServerConfig) {
     this.config = config;
+  }
+
+  private logEvent(event: Omit<DiagnosticEvent, 'timestamp'>): void {
+    const fullEvent: DiagnosticEvent = { ...event, timestamp: Date.now() };
+    this.recentEvents.push(fullEvent);
+    // Keep only the most recent events
+    if (this.recentEvents.length > this.maxRecentEvents) {
+      this.recentEvents = this.recentEvents.slice(-this.maxRecentEvents);
+    }
+    console.error(`[Event] ${event.type}: ${event.message}`);
+  }
+
+  getDiagnostics(): DiagnosticsInfo {
+    const activeCallDetails = Array.from(this.activeCalls.entries()).map(([callId, state]) => ({
+      callId,
+      state: state.hungUp ? 'hung_up' : state.ws ? 'connected' : 'connecting',
+      durationSecs: Math.round((Date.now() - state.startTime) / 1000),
+      wsConnected: state.ws?.readyState === WebSocket.OPEN,
+      streamReady: !!(state.streamSid || state.streamingReady),
+    }));
+
+    return {
+      serverStatus: 'running',
+      uptime: Math.round((Date.now() - this.startTime) / 1000),
+      ngrokUrl: this.config.publicUrl,
+      ngrokStatus: 'connected',
+      activeCalls: this.activeCalls.size,
+      config: {
+        connectionTimeoutMs: this.config.connectionTimeoutMs,
+        maxCallRetries: this.config.maxCallRetries,
+        phoneProvider: this.config.providers.phone.name,
+        phoneNumber: this.config.phoneNumber,
+        userPhoneNumber: this.config.userPhoneNumber,
+      },
+      recentEvents: this.recentEvents.slice(-20),  // Return last 20 events
+      activeCallDetails,
+    };
   }
 
   setPublicUrl(url: string): void {
@@ -97,6 +178,12 @@ export class CallManager {
       if (url.pathname === '/health') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ok', activeCalls: this.activeCalls.size }));
+        return;
+      }
+
+      if (url.pathname === '/diagnostics') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(this.getDiagnostics(), null, 2));
         return;
       }
 
@@ -436,12 +523,82 @@ export class CallManager {
   }
 
   async initiateCall(message: string): Promise<{ callId: string; response: string }> {
+    const maxAttempts = this.config.maxCallRetries + 1;
+    let lastError: Error | null = null;
+    const failedAttemptErrors: string[] = [];
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const result = await this.attemptCall(message, attempt, maxAttempts);
+        return result;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        failedAttemptErrors.push(`Attempt ${attempt}: ${lastError.message}`);
+        const isLastAttempt = attempt === maxAttempts;
+
+        if (isLastAttempt) {
+          console.error(`[Call] All ${maxAttempts} attempts failed. Last error: ${lastError.message}`);
+        } else {
+          console.error(`[Call] Attempt ${attempt}/${maxAttempts} failed: ${lastError.message}. Retrying...`);
+          // Brief delay between retries to allow phone provider to settle
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+      }
+    }
+
+    // Generate diagnostic summary for the error
+    const diagSummary = this.generateFailureDiagnostics(lastError!, failedAttemptErrors);
+    throw new Error(diagSummary);
+  }
+
+  private generateFailureDiagnostics(lastError: Error, attemptErrors: string[]): string {
+    const diag = this.getDiagnostics();
+    const lines: string[] = [];
+
+    lines.push(`Call failed after ${attemptErrors.length} attempt(s).`);
+    lines.push('');
+    lines.push('**Attempt Summary:**');
+    attemptErrors.forEach(err => lines.push(`- ${err}`));
+    lines.push('');
+
+    // Analyze the error and provide remediation suggestions
+    const errorMsg = lastError.message.toLowerCase();
+    lines.push('**Diagnosis:**');
+
+    if (errorMsg.includes('phone was not answered') || errorMsg.includes('timeout')) {
+      lines.push('- The phone was not answered within the timeout period.');
+      lines.push('- Suggestion: Ensure the user is available to answer their phone, or increase CALLME_CONNECTION_TIMEOUT_MS.');
+    } else if (errorMsg.includes('telnyx') || errorMsg.includes('twilio')) {
+      lines.push('- The phone provider API returned an error.');
+      lines.push('- Suggestion: Check your Telnyx/Twilio credentials and account status.');
+    } else if (errorMsg.includes('websocket') || errorMsg.includes('streaming')) {
+      lines.push('- WebSocket or media streaming failed to establish.');
+      lines.push('- Suggestion: The ngrok tunnel may have issues. Check if the webhook URL is reachable.');
+    } else if (errorMsg.includes('ngrok')) {
+      lines.push('- The ngrok tunnel may be down or unreachable.');
+      lines.push('- Suggestion: Restart the callme server to re-establish the ngrok tunnel.');
+    } else {
+      lines.push(`- Unknown error pattern: ${lastError.message}`);
+      lines.push('- Suggestion: Use get_diagnostics to inspect recent events for more context.');
+    }
+
+    lines.push('');
+    lines.push('**Server Status:**');
+    lines.push(`- Uptime: ${diag.uptime}s`);
+    lines.push(`- ngrok URL: ${diag.ngrokUrl}`);
+    lines.push(`- Recent failed events: ${diag.recentEvents.filter(e => e.type === 'call_failed').length}`);
+
+    return lines.join('\n');
+  }
+
+  private async attemptCall(message: string, attempt: number, maxAttempts: number): Promise<{ callId: string; response: string }> {
     const callId = `call-${++this.currentCallId}-${Date.now()}`;
+    const attemptLabel = maxAttempts > 1 ? ` (attempt ${attempt}/${maxAttempts})` : '';
 
     // Create realtime transcription session via provider
     const sttSession = this.config.providers.stt.createSession();
     await sttSession.connect();
-    console.error(`[${callId}] STT session connected`);
+    console.error(`[${callId}] STT session connected${attemptLabel}`);
 
     // Generate secure token for WebSocket authentication
     const wsToken = generateWebSocketToken();
@@ -463,6 +620,13 @@ export class CallManager {
     this.activeCalls.set(callId, state);
 
     try {
+      this.logEvent({
+        type: 'call_initiated',
+        callId,
+        message: `Initiating call to ${this.config.userPhoneNumber}${attemptLabel}`,
+        details: { attempt, maxAttempts, webhookUrl: `${this.config.publicUrl}/twiml` },
+      });
+
       const callControlId = await this.config.providers.phone.initiateCall(
         this.config.userPhoneNumber,
         this.config.phoneNumber,
@@ -473,13 +637,22 @@ export class CallManager {
       this.callControlIdToCallId.set(callControlId, callId);
       this.wsTokenToCallId.set(wsToken, callId);
 
-      console.error(`Call initiated: ${callControlId} -> ${this.config.userPhoneNumber}`);
+      console.error(`[${callId}] Call initiated successfully: ${callControlId}`);
 
       // Start TTS generation in parallel with waiting for connection
-      // This reduces latency by generating audio while Twilio establishes the stream
+      // This reduces latency by generating audio while phone provider establishes the stream
       const ttsPromise = this.generateTTSAudio(message);
 
-      await this.waitForConnection(callId, 15000);
+      const timeoutMs = this.config.connectionTimeoutMs;
+      console.error(`[${callId}] Waiting for connection (timeout: ${timeoutMs / 1000}s)...`);
+      await this.waitForConnection(callId, timeoutMs);
+
+      this.logEvent({
+        type: 'call_connected',
+        callId,
+        message: 'Call connected successfully',
+        details: { callControlId },
+      });
 
       // Send the pre-generated audio and listen for response
       const audioData = await ttsPromise;
@@ -490,8 +663,27 @@ export class CallManager {
 
       return { callId, response };
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.logEvent({
+        type: 'call_failed',
+        callId,
+        message: `Call failed: ${errorMessage}`,
+        details: { attempt, maxAttempts, error: errorMessage },
+      });
+
+      // Clean up this failed attempt
       state.sttSession?.close();
       this.activeCalls.delete(callId);
+      if (state.callControlId) {
+        this.callControlIdToCallId.delete(state.callControlId);
+        // Try to hang up the call if it was initiated but connection failed
+        try {
+          await this.config.providers.phone.hangup(state.callControlId);
+        } catch {
+          // Ignore hangup errors on cleanup
+        }
+      }
+      this.wsTokenToCallId.delete(wsToken);
       throw error;
     }
   }
@@ -543,11 +735,21 @@ export class CallManager {
     const durationSeconds = Math.round((Date.now() - state.startTime) / 1000);
     this.activeCalls.delete(callId);
 
+    this.logEvent({
+      type: 'call_ended',
+      callId,
+      message: `Call ended normally after ${durationSeconds}s`,
+      details: { durationSeconds },
+    });
+
     return { durationSeconds };
   }
 
   private async waitForConnection(callId: string, timeout: number): Promise<void> {
     const startTime = Date.now();
+    let lastLogTime = 0;
+    const logInterval = 5000;  // Log status every 5 seconds
+
     while (Date.now() - startTime < timeout) {
       const state = this.activeCalls.get(callId);
       // Wait for WebSocket AND streaming to be ready:
@@ -555,12 +757,45 @@ export class CallManager {
       // - Telnyx: streamingReady is set from "streaming.started" webhook
       const wsReady = state?.ws && state.ws.readyState === WebSocket.OPEN;
       const streamReady = state?.streamSid || state?.streamingReady;
+
       if (wsReady && streamReady) {
+        console.error(`[${callId}] Connection established successfully`);
         return;
       }
+
+      // Periodic status logging for debugging
+      const elapsed = Date.now() - startTime;
+      if (elapsed - lastLogTime >= logInterval) {
+        lastLogTime = elapsed;
+        const wsStatus = state?.ws
+          ? `readyState=${state.ws.readyState} (${state.ws.readyState === WebSocket.OPEN ? 'OPEN' : 'NOT OPEN'})`
+          : 'not connected';
+        const streamStatus = state?.streamSid
+          ? `streamSid=${state.streamSid}`
+          : state?.streamingReady
+          ? 'ready'
+          : 'not ready';
+        console.error(`[${callId}] Waiting for connection... (${Math.round(elapsed / 1000)}s) - WebSocket: ${wsStatus}, Stream: ${streamStatus}`);
+      }
+
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    throw new Error('WebSocket connection timeout');
+
+    // Provide detailed timeout error
+    const state = this.activeCalls.get(callId);
+    const wsConnected = state?.ws && state.ws.readyState === WebSocket.OPEN;
+    const streamReady = state?.streamSid || state?.streamingReady;
+
+    let reason = 'Unknown reason';
+    if (!wsConnected && !streamReady) {
+      reason = 'Phone was not answered or call failed to connect';
+    } else if (!wsConnected) {
+      reason = 'WebSocket connection not established (call may have been answered but streaming failed)';
+    } else if (!streamReady) {
+      reason = 'Media streaming not started (WebSocket connected but stream initialization failed)';
+    }
+
+    throw new Error(`Connection timeout after ${timeout / 1000}s: ${reason}`);
   }
 
   /**
