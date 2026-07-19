@@ -75,9 +75,6 @@ class TelnyxSTTSession implements RealtimeSTTSession {
   private silenceDurationMs: number;
   private connected = false;
   private closed = false;
-  private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
-  private reconnectDelayMs = 1000;
 
   private partialCallback: ((partial: string) => void) | null = null;
   private transcriptResolve: ((transcript: string) => void) | null = null;
@@ -116,7 +113,6 @@ class TelnyxSTTSession implements RealtimeSTTSession {
 
   async connect(): Promise<void> {
     this.closed = false;
-    this.reconnectAttempts = 0;
     return this.doConnect();
   }
 
@@ -126,9 +122,18 @@ class TelnyxSTTSession implements RealtimeSTTSession {
         headers: { Authorization: `Bearer ${this.apiKey}` },
       });
 
+      // Abort the connect attempt if the server never opens the session.
+      // Without this, a hung WebSocket would block initiateCall() forever.
+      const connectTimeout = setTimeout(() => {
+        if (!this.connected) {
+          try { ws.removeAllListeners(); ws.close(); } catch {}
+          reject(new Error('Telnyx STT connection timeout'));
+        }
+      }, 10000);
+
       ws.on('open', () => {
+        clearTimeout(connectTimeout);
         this.connected = true;
-        this.reconnectAttempts = 0;
         console.error('[Telnyx STT] Connected');
         resolve();
       });
@@ -165,6 +170,7 @@ class TelnyxSTTSession implements RealtimeSTTSession {
       });
 
       ws.on('error', (err: Error) => {
+        clearTimeout(connectTimeout);
         console.error(`[Telnyx STT] Error: ${err.message}`);
         if (!this.connected) reject(err);
         else if (this.transcriptReject) {
@@ -198,11 +204,18 @@ class TelnyxSTTSession implements RealtimeSTTSession {
   }
 
   async waitForTranscript(timeoutMs?: number): Promise<string> {
+    // If finals already arrived before anyone was listening (e.g. the user
+    // spoke during TTS playback), return the buffered transcript instead of
+    // dropping it on the floor.
+    if (this.pendingTranscript) {
+      const full = this.pendingTranscript;
+      this.pendingTranscript = '';
+      return full;
+    }
     const timeout = timeoutMs ?? (this.silenceDurationMs + 5000);
     return new Promise((resolve, reject) => {
       this.transcriptResolve = resolve;
       this.transcriptReject = reject;
-      this.pendingTranscript = '';
       this.transcriptTimeout = setTimeout(() => {
         if (this.transcriptReject) {
           const rejectFn = this.transcriptReject;

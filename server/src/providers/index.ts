@@ -184,8 +184,13 @@ export function validateProviderConfig(config: ProviderConfig): string[] {
   if (!config.phoneNumber) {
     errors.push('Missing CALLME_PHONE_NUMBER');
   }
-  if (!config.openaiApiKey && config.sttProvider !== 'telnyx' && config.ttsProvider !== 'telnyx') {
-    errors.push('Missing CALLME_OPENAI_API_KEY (required for OpenAI STT/TTS; not required when using Telnyx STT and TTS)');
+  // OpenAI key is required whenever any non-Telnyx STT or TTS provider is
+  // selected. The previous logic only errored when BOTH were non-Telnyx,
+  // which let mixed configs (e.g. openai-realtime STT + telnyx TTS) start
+  // up clean and then fail at runtime.
+  const needsOpenAI = config.sttProvider === 'openai-realtime' || config.ttsProvider === 'openai';
+  if (!config.openaiApiKey && needsOpenAI) {
+    errors.push('Missing CALLME_OPENAI_API_KEY (required when using OpenAI for STT or TTS)');
   }
 
   return errors;
