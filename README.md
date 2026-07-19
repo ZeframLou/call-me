@@ -66,6 +66,7 @@ CALLME_PHONE_AUTH_TOKEN=<Auth Token>
 
 ### 3. Set Environment Variables
 
+
 Add these to `~/.claude/settings.json` (recommended) or export them in your shell:
 
 ```json
@@ -91,14 +92,15 @@ Add these to `~/.claude/settings.json` (recommended) or export them in your shel
 | `CALLME_PHONE_AUTH_TOKEN` | Telnyx API Key or Twilio Auth Token |
 | `CALLME_PHONE_NUMBER` | Phone number Claude calls from (E.164 format) |
 | `CALLME_USER_PHONE_NUMBER` | Your phone number to receive calls |
-| `CALLME_OPENAI_API_KEY` | OpenAI API key (required for STT; also for TTS unless using Kokoro) |
+| `CALLME_OPENAI_API_KEY` | OpenAI API key (required for OpenAI STT/TTS; not required when using Telnyx for both STT and TTS) |
 | `CALLME_NGROK_AUTHTOKEN` | ngrok auth token for webhook tunneling |
 
 #### Optional Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CALLME_TTS_PROVIDER` | `openai` | TTS engine: `openai` or `kokoro` (free, local — see [Kokoro TTS](#kokoro-tts-free-local)) |
+| `CALLME_TTS_PROVIDER` | `openai` | TTS engine: `openai`, `kokoro` (free, local — see [Kokoro TTS](#kokoro-tts-free-local)), or `telnyx` (reuses Telnyx API key) |
+| `CALLME_STT_PROVIDER` | `telnyx`* | STT engine: `openai-realtime` or `telnyx` (reuses Telnyx API key). *Defaults to `telnyx` when `CALLME_PHONE_PROVIDER=telnyx` |
 | `CALLME_TTS_VOICE` | `onyx` / `af_bella` | Voice name (default depends on TTS provider) |
 | `CALLME_KOKORO_URL` | - | URL of existing Kokoro instance (e.g. `http://localhost:8880/v1`). If unset, auto-starts Docker container |
 | `CALLME_PORT` | `0` (auto) | Local HTTP server port (0 = OS picks a free port) |
@@ -106,6 +108,11 @@ Add these to `~/.claude/settings.json` (recommended) or export them in your shel
 | `CALLME_TRANSCRIPT_TIMEOUT_MS` | `180000` | Timeout for user speech (3 minutes) |
 | `CALLME_STT_SILENCE_DURATION_MS` | `800` | Silence duration to detect end of speech |
 | `CALLME_TELNYX_PUBLIC_KEY` | - | Telnyx public key for webhook signature verification (recommended) |
+| `CALLME_TELNYX_STT_ENGINE` | `Telnyx` | Telnyx STT engine: `Telnyx`, `Deepgram`, `Google`, or `Azure` |
+| `CALLME_TELNYX_STT_INPUT_FORMAT` | `mulaw` | Telnyx STT audio format: `mulaw`, `linear16`, or `alaw` |
+| `CALLME_TELNYX_STT_LANGUAGE` | `en-US` | Telnyx STT language (BCP-47 code) |
+| `CALLME_TELNYX_TTS_VOICE` | `AWS.Polly.Matthew-Neural` | Telnyx TTS voice ID (see `/v2/text-to-speech/voices` for catalog) |
+| `CALLME_TELNYX_API_KEY` | - | Telnyx API key for STT/TTS (defaults to `CALLME_PHONE_AUTH_TOKEN`) |
 
 ### 4. Install Plugin
 
