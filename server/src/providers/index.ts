@@ -5,21 +5,27 @@
  * Supports Telnyx or Twilio for phone, OpenAI for TTS and Realtime STT.
  */
 
-import type { PhoneProvider, TTSProvider, RealtimeSTTProvider, ProviderRegistry } from './types.js';
+import type { PhoneProvider, TTSProvider, RealtimeSTTProvider, ProviderRegistry, STTConfig } from './types.js';
 import { TelnyxPhoneProvider } from './phone-telnyx.js';
 import { TwilioPhoneProvider } from './phone-twilio.js';
 import { OpenAITTSProvider } from './tts-openai.js';
 import { KokoroTTSProvider } from './tts-kokoro.js';
 import { OpenAIRealtimeSTTProvider } from './stt-openai-realtime.js';
+import { TelnyxSTTProvider } from './stt-telnyx.js';
+import { TelnyxTTSProvider } from './tts-telnyx.js';
 
 export * from './types.js';
 
 export type PhoneProviderType = 'telnyx' | 'twilio';
-export type TTSProviderType = 'openai' | 'kokoro';
+export type STTProviderType = 'openai-realtime' | 'telnyx';
+export type TTSProviderType = 'openai' | 'kokoro' | 'telnyx';
 
 export interface ProviderConfig {
   // Phone provider selection
   phoneProvider: PhoneProviderType;
+
+  // STT provider selection
+  sttProvider: STTProviderType;
 
   // TTS provider selection
   ttsProvider: TTSProviderType;
@@ -43,6 +49,13 @@ export interface ProviderConfig {
 
   // Kokoro TTS (when ttsProvider is 'kokoro')
   kokoroUrl?: string;
+
+  // Telnyx STT/TTS (uses the same API key as the Telnyx phone provider)
+  telnyxApiKey?: string;
+  telnyxSttEngine?: string;   // 'Telnyx' | 'Deepgram' | 'Google' | 'Azure'
+  telnyxSttInputFormat?: string; // 'mulaw' | 'linear16' | 'alaw'
+  telnyxSttLanguage?: string;
+  telnyxTtsVoice?: string;
 }
 
 export function loadProviderConfig(): ProviderConfig {
@@ -52,10 +65,12 @@ export function loadProviderConfig(): ProviderConfig {
 
   // Default to telnyx if not specified
   const phoneProvider = (process.env.CALLME_PHONE_PROVIDER || 'telnyx') as PhoneProviderType;
+  const sttProvider = (process.env.CALLME_STT_PROVIDER || (process.env.CALLME_PHONE_PROVIDER === 'telnyx' ? 'telnyx' : 'openai-realtime')) as STTProviderType;
   const ttsProvider = (process.env.CALLME_TTS_PROVIDER || 'openai') as TTSProviderType;
 
   return {
     phoneProvider,
+    sttProvider,
     ttsProvider,
     phoneAccountSid: process.env.CALLME_PHONE_ACCOUNT_SID || '',
     phoneAuthToken: process.env.CALLME_PHONE_AUTH_TOKEN || '',
@@ -66,6 +81,11 @@ export function loadProviderConfig(): ProviderConfig {
     sttModel: process.env.CALLME_STT_MODEL || 'gpt-4o-transcribe',
     sttSilenceDurationMs,
     kokoroUrl: process.env.CALLME_KOKORO_URL,
+    telnyxApiKey: process.env.CALLME_TELNYX_API_KEY || process.env.CALLME_PHONE_AUTH_TOKEN,
+    telnyxSttEngine: process.env.CALLME_TELNYX_STT_ENGINE,
+    telnyxSttInputFormat: process.env.CALLME_TELNYX_STT_INPUT_FORMAT,
+    telnyxSttLanguage: process.env.CALLME_TELNYX_STT_LANGUAGE,
+    telnyxTtsVoice: process.env.CALLME_TELNYX_TTS_VOICE,
   };
 }
 
@@ -88,6 +108,15 @@ export function createPhoneProvider(config: ProviderConfig): PhoneProvider {
 }
 
 export function createTTSProvider(config: ProviderConfig): TTSProvider {
+  if (config.ttsProvider === 'telnyx') {
+    const provider = new TelnyxTTSProvider();
+    provider.initialize({
+      apiKey: config.telnyxApiKey || config.phoneAuthToken,
+      voice: config.telnyxTtsVoice,
+    });
+    return provider;
+  }
+
   if (config.ttsProvider === 'kokoro') {
     const provider = new KokoroTTSProvider();
     provider.initialize({
@@ -106,6 +135,18 @@ export function createTTSProvider(config: ProviderConfig): TTSProvider {
 }
 
 export function createSTTProvider(config: ProviderConfig): RealtimeSTTProvider {
+  if (config.sttProvider === 'telnyx') {
+    const provider = new TelnyxSTTProvider();
+    provider.initialize({
+      apiKey: config.telnyxApiKey || config.phoneAuthToken,
+      model: config.telnyxSttLanguage,
+      silenceDurationMs: config.sttSilenceDurationMs,
+      transcriptionEngine: config.telnyxSttEngine,
+      inputFormat: config.telnyxSttInputFormat,
+    } as STTConfig);
+    return provider;
+  }
+
   const provider = new OpenAIRealtimeSTTProvider();
   provider.initialize({
     apiKey: config.openaiApiKey,
@@ -143,8 +184,8 @@ export function validateProviderConfig(config: ProviderConfig): string[] {
   if (!config.phoneNumber) {
     errors.push('Missing CALLME_PHONE_NUMBER');
   }
-  if (!config.openaiApiKey) {
-    errors.push('Missing CALLME_OPENAI_API_KEY (required for speech-to-text, even when using Kokoro TTS)');
+  if (!config.openaiApiKey && config.sttProvider !== 'telnyx' && config.ttsProvider !== 'telnyx') {
+    errors.push('Missing CALLME_OPENAI_API_KEY (required for OpenAI STT/TTS; not required when using Telnyx STT and TTS)');
   }
 
   return errors;
